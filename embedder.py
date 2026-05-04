@@ -3,7 +3,6 @@ import httpx
 
 
 async def get_embedding(text: str) -> list[float]:
-    """Genera embedding de un texto usando Ollama API."""
     api_base = os.environ["OLLAMA_API_BASE"].rstrip("/")
     api_key = os.environ["OLLAMA_API_KEY"]
     model = os.environ["OLLAMA_EMBED_MODEL"]
@@ -15,13 +14,15 @@ async def get_embedding(text: str) -> list[float]:
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={"model": model, "input": text},
+            json={
+                "model": model,
+                "prompt": text   # 🔥 clave: no es "input"
+            },
         )
         response.raise_for_status()
         data = response.json()
 
-        # La API de Ollama compatible con OpenAI devuelve data[0].embedding
-        return data["data"][0]["embedding"]
+        return data["embedding"]  # 🔥 clave
 
 
 async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
