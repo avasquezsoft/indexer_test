@@ -11,8 +11,8 @@ from qdrant_client.models import (
 
 from config import QDRANT_URL, QDRANT_API_KEY
 
-# Dimensión del modelo nomic-embed-text
-VECTOR_SIZE = 768
+# Dimensión del modelo text-embedding-3-small (OpenRouter)
+VECTOR_SIZE = 1536
 
 
 def get_client() -> QdrantClient:
@@ -32,13 +32,42 @@ def ping_client(client: QdrantClient) -> bool:
 
 
 def ensure_collection(client: QdrantClient, collection: str):
-    """Crea la colección si no existe."""
-    existing = [c.name for c in client.get_collections().collections]
-    if collection not in existing:
+    """Crea la colección si no existe. Si existe pero con dimensiones distintas, la recrea."""
+    import logging
+    log = logging.getLogger(__name__)
+
+    existing_names = [c.name for c in client.get_collections().collections]
+
+    if collection not in existing_names:
         client.create_collection(
             collection_name=collection,
             vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
         )
+        log.info(f"Colección '{collection}' creada con dimensión {VECTOR_SIZE}")
+        return
+
+    # Validar que la dimensión coincida con el modelo actual
+    info = client.get_collection(collection)
+    current_size = None
+    vectors_config = info.config.params.vectors
+
+    if hasattr(vectors_config, "size"):
+        current_size = vectors_config.size
+    elif isinstance(vectors_config, dict) and "size" in vectors_config:
+        current_size = vectors_config["size"]
+
+    if current_size is not None and current_size != VECTOR_SIZE:
+        log.warning(
+            f"Colección '{collection}' existe con dimensión {current_size}, "
+            f"pero el modelo actual requiere {VECTOR_SIZE}. Se eliminará y recreará."
+        )
+        client.delete_collection(collection_name=collection)
+        client.create_collection(
+            collection_name=collection,
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+        )
+        log.info(f"Colección '{collection}' recreada con dimensión {VECTOR_SIZE}")
+
 
 
 def delete_repo_chunks(client: QdrantClient, collection: str, repo: str):
