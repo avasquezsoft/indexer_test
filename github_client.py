@@ -1,7 +1,12 @@
-import os
 import time
-import httpx
 import jwt
+import httpx
+
+from config import (
+    GITHUB_APP_ID,
+    GITHUB_APP_INSTALLATION_ID,
+    GITHUB_APP_PRIVATE_KEY,
+)
 
 # Extensiones de archivo que indexamos
 SUPPORTED_EXTENSIONS = {
@@ -18,11 +23,13 @@ IGNORED_PATHS = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml"
 }
 
+# Timeout para llamadas a la API de GitHub (segundos)
+_GITHUB_TIMEOUT = 30.0
+
 
 def _get_jwt_token() -> str:
     """Genera un JWT firmado con la private key de la GitHub App."""
-    app_id = os.environ["GITHUB_APP_ID"]
-    private_key_raw = os.environ["GITHUB_APP_PRIVATE_KEY"]
+    private_key_raw = GITHUB_APP_PRIVATE_KEY
     # El .env guarda \n como texto literal — los convertimos a saltos reales
     private_key = private_key_raw.replace("\\n", "\n")
 
@@ -30,19 +37,18 @@ def _get_jwt_token() -> str:
     payload = {
         "iat": now - 60,
         "exp": now + (10 * 60),
-        "iss": app_id,
+        "iss": GITHUB_APP_ID,
     }
     return jwt.encode(payload, private_key, algorithm="RS256")
 
 
 def get_installation_token() -> str:
     """Obtiene un token de instalación para acceder a los repos de la org."""
-    installation_id = os.environ["GITHUB_APP_INSTALLATION_ID"]
     jwt_token = _get_jwt_token()
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         response = client.post(
-            f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+            f"https://api.github.com/app/installations/{GITHUB_APP_INSTALLATION_ID}/access_tokens",
             headers={
                 "Authorization": f"Bearer {jwt_token}",
                 "Accept": "application/vnd.github+json",
@@ -58,7 +64,7 @@ def list_repos(token: str) -> list[dict]:
     repos = []
     url = "https://api.github.com/installation/repositories"
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         while url:
             response = client.get(
                 url,
@@ -80,7 +86,7 @@ def list_repos(token: str) -> list[dict]:
 
 def get_repo_files(token: str, owner: str, repo: str, ref: str = "HEAD") -> list[dict]:
     """Obtiene el árbol completo de archivos de un repo."""
-    with httpx.Client() as client:
+    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         response = client.get(
             f"https://api.github.com/repos/{owner}/{repo}/git/trees/{ref}",
             headers={
@@ -104,7 +110,7 @@ def get_repo_files(token: str, owner: str, repo: str, ref: str = "HEAD") -> list
         if any(p in IGNORED_PATHS for p in parts):
             continue
         # Solo extensiones soportadas
-        ext = os.path.splitext(path)[1].lower()
+        ext = __import__("os").path.splitext(path)[1].lower()
         if ext not in SUPPORTED_EXTENSIONS:
             continue
         files.append({"path": path, "sha": item["sha"], "size": item.get("size", 0)})
@@ -114,8 +120,7 @@ def get_repo_files(token: str, owner: str, repo: str, ref: str = "HEAD") -> list
 
 def get_file_content(token: str, owner: str, repo: str, path: str) -> str | None:
     """Descarga el contenido de un archivo."""
-    # Ignorar archivos muy grandes (>500KB)
-    with httpx.Client() as client:
+    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         response = client.get(
             f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
             headers={

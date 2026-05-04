@@ -1,4 +1,3 @@
-import os
 import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -10,15 +9,26 @@ from qdrant_client.models import (
     MatchValue,
 )
 
+from config import QDRANT_URL, QDRANT_API_KEY
+
 # Dimensión del modelo nomic-embed-text
 VECTOR_SIZE = 768
 
 
 def get_client() -> QdrantClient:
     return QdrantClient(
-        url=os.environ["QDRANT_URL"],
-        api_key=os.environ.get("QDRANT_API_KEY"),
+        url=QDRANT_URL,
+        api_key=QDRANT_API_KEY,
     )
+
+
+def ping_client(client: QdrantClient) -> bool:
+    """Verifica que Qdrant responde."""
+    try:
+        client.get_collections()
+        return True
+    except Exception:
+        return False
 
 
 def ensure_collection(client: QdrantClient, collection: str):

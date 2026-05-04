@@ -1,20 +1,25 @@
-import os
 import hmac
 import hashlib
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, field_validator
 
 from github_client import get_installation_token, get_repo_files, get_file_content
 from chunker import chunk_file
 from embedder import get_embedding, get_embeddings_batch
-from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks
+from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks, ping_client
+from config import QDRANT_COLLECTION, WEBHOOK_SECRET
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+# Regex simple para validar formato org/repo
+_REPO_PATTERN = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
 # ─────────────────────────────────────────
@@ -23,20 +28,26 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    collection = os.environ.get("QDRANT_COLLECTION")
-    if not collection:
+    if not QDRANT_COLLECTION:
         log.error("La variable de entorno QDRANT_COLLECTION no está definida")
         raise RuntimeError("QDRANT_COLLECTION es obligatoria")
 
     client = get_client()
-    ensure_collection(client, collection)
-    log.info(f"Qdrant collection '{collection}' lista")
-
-    app.state.collection = collection
+    ensure_collection(client, QDRANT_COLLECTION)
+    log.info(f"Qdrant collection '{QDRANT_COLLECTION}' lista")
     yield
 
 
 app = FastAPI(title="Tennis Doc Indexer", lifespan=lifespan)
+
+# CORS básico para permitir llamadas desde el frontend / Open WebUI
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ─────────────────────────────────────────
@@ -44,7 +55,7 @@ app = FastAPI(title="Tennis Doc Indexer", lifespan=lifespan)
 # ─────────────────────────────────────────
 
 def _verify_signature(body: bytes, signature: str) -> bool:
-    secret = os.environ["WEBHOOK_SECRET"].encode()
+    secret = WEBHOOK_SECRET.encode()
     expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
 
@@ -79,8 +90,6 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
 async def index_repo(full_repo_name: str):
     """Indexa todos los archivos de un repo. Corre en background."""
-    collection = app.state.collection
-
     try:
         owner, repo = full_repo_name.split("/", 1)
         log.info(f"Indexando {full_repo_name}...")
@@ -91,7 +100,7 @@ async def index_repo(full_repo_name: str):
 
         client = get_client()
         # Borrar chunks anteriores de este repo para re-indexar limpio
-        delete_repo_chunks(client, collection, full_repo_name)
+        delete_repo_chunks(client, QDRANT_COLLECTION, full_repo_name)
 
         total_chunks = 0
         for file_info in files:
@@ -106,7 +115,7 @@ async def index_repo(full_repo_name: str):
 
                 texts = [c["metadata"]["embed_text"] for c in chunks]
                 embeddings = await get_embeddings_batch(texts)
-                upsert_chunks(client, collection, chunks, embeddings)
+                upsert_chunks(client, QDRANT_COLLECTION, chunks, embeddings)
                 total_chunks += len(chunks)
             except Exception as exc:
                 log.warning(f"Error procesando {file_info['path']} en {full_repo_name}: {exc}")
@@ -124,6 +133,13 @@ async def index_repo(full_repo_name: str):
 
 class IndexRequest(BaseModel):
     repo: str  # formato: "org/repo-name"
+
+    @field_validator("repo")
+    @classmethod
+    def validate_repo_format(cls, v: str) -> str:
+        if not _REPO_PATTERN.match(v):
+            raise ValueError("El campo 'repo' debe tener el formato 'org/repo-name'")
+        return v
 
 
 @app.post("/index")
@@ -146,7 +162,6 @@ class SearchRequest(BaseModel):
 @app.post("/search")
 async def search(req: SearchRequest):
     """Busca chunks relevantes para una pregunta."""
-    collection = app.state.collection
     try:
         query_vector = await get_embedding(req.query)
     except Exception as exc:
@@ -154,14 +169,18 @@ async def search(req: SearchRequest):
         raise HTTPException(status_code=502, detail="Error al generar el embedding")
 
     client = get_client()
-    results = search_chunks(client, collection, query_vector, req.repo, req.limit)
+    results = search_chunks(client, QDRANT_COLLECTION, query_vector, req.repo, req.limit)
     return {"results": results}
 
 
 # ─────────────────────────────────────────
-# Health check
+# Health check (con verificación de Qdrant)
 # ─────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    client = get_client()
+    qdrant_ok = ping_client(client)
+    if not qdrant_ok:
+        raise HTTPException(status_code=503, detail="Qdrant no responde")
+    return {"status": "ok", "qdrant": "reachable"}
