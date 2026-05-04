@@ -16,8 +16,7 @@ VECTOR_SIZE = 768
 
 def get_client() -> QdrantClient:
     return QdrantClient(
-        host=os.environ["QDRANT_HOST"],
-        port=int(os.environ["QDRANT_PORT"]),
+        url=os.environ["QDRANT_URL"],
         api_key=os.environ.get("QDRANT_API_KEY"),
     )
 
