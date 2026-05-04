@@ -1,7 +1,6 @@
 import os
 import hmac
 import hashlib
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -17,15 +16,23 @@ from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upse
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-COLLECTION = os.environ["QDRANT_COLLECTION"]
 
+# ─────────────────────────────────────────
+# Lifespan — validación de entorno al arrancar
+# ─────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Al arrancar: crear colección si no existe
+    collection = os.environ.get("QDRANT_COLLECTION")
+    if not collection:
+        log.error("La variable de entorno QDRANT_COLLECTION no está definida")
+        raise RuntimeError("QDRANT_COLLECTION es obligatoria")
+
     client = get_client()
-    ensure_collection(client, COLLECTION)
-    log.info(f"Qdrant collection '{COLLECTION}' lista")
+    ensure_collection(client, collection)
+    log.info(f"Qdrant collection '{collection}' lista")
+
+    app.state.collection = collection
     yield
 
 
@@ -72,6 +79,8 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
 async def index_repo(full_repo_name: str):
     """Indexa todos los archivos de un repo. Corre en background."""
+    collection = app.state.collection
+
     try:
         owner, repo = full_repo_name.split("/", 1)
         log.info(f"Indexando {full_repo_name}...")
@@ -82,22 +91,26 @@ async def index_repo(full_repo_name: str):
 
         client = get_client()
         # Borrar chunks anteriores de este repo para re-indexar limpio
-        delete_repo_chunks(client, COLLECTION, full_repo_name)
+        delete_repo_chunks(client, collection, full_repo_name)
 
         total_chunks = 0
         for file_info in files:
-            content = get_file_content(token, owner, repo, file_info["path"])
-            if not content or not content.strip():
-                continue
+            try:
+                content = get_file_content(token, owner, repo, file_info["path"])
+                if not content or not content.strip():
+                    continue
 
-            chunks = chunk_file(content, file_info["path"], full_repo_name)
-            if not chunks:
-                continue
+                chunks = chunk_file(content, file_info["path"], full_repo_name)
+                if not chunks:
+                    continue
 
-            texts = [c["metadata"]["embed_text"] for c in chunks]
-            embeddings = await get_embeddings_batch(texts)
-            upsert_chunks(client, COLLECTION, chunks, embeddings)
-            total_chunks += len(chunks)
+                texts = [c["metadata"]["embed_text"] for c in chunks]
+                embeddings = await get_embeddings_batch(texts)
+                upsert_chunks(client, collection, chunks, embeddings)
+                total_chunks += len(chunks)
+            except Exception as exc:
+                log.warning(f"Error procesando {file_info['path']} en {full_repo_name}: {exc}")
+                continue
 
         log.info(f"Indexación completa: {full_repo_name} — {total_chunks} chunks guardados")
 
@@ -133,9 +146,15 @@ class SearchRequest(BaseModel):
 @app.post("/search")
 async def search(req: SearchRequest):
     """Busca chunks relevantes para una pregunta."""
-    query_vector = await get_embedding(req.query)
+    collection = app.state.collection
+    try:
+        query_vector = await get_embedding(req.query)
+    except Exception as exc:
+        log.error(f"Error generando embedding de búsqueda: {exc}")
+        raise HTTPException(status_code=502, detail="Error al generar el embedding")
+
     client = get_client()
-    results = search_chunks(client, COLLECTION, query_vector, req.repo, req.limit)
+    results = search_chunks(client, collection, query_vector, req.repo, req.limit)
     return {"results": results}
 
 

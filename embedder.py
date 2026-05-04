@@ -1,34 +1,41 @@
 import os
+import logging
 import httpx
+
+log = logging.getLogger(__name__)
 
 
 async def get_embedding(text: str) -> list[float]:
-    api_base = os.environ["OLLAMA_API_BASE"].rstrip("/")
-    api_key = os.environ["OLLAMA_API_KEY"]
-    model = os.environ["OLLAMA_EMBED_MODEL"]
+    """Genera el embedding para un único texto usando OpenRouter."""
+    embeddings = await get_embeddings_batch([text])
+    return embeddings[0]
 
-    async with httpx.AsyncClient(timeout=30) as client:
+
+async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
+    """Genera embeddings para una lista de textos vía OpenRouter."""
+    api_base = os.environ["OPENROUTER_API_BASE"].rstrip("/")
+    api_key = os.environ["OPENROUTER_API_KEY"]
+    model = os.environ["OPENROUTER_EMBED_MODEL"]
+
+    async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
-            f"{api_base}/embed",
+            f"{api_base}/embeddings",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "HTTP-Referer": "https://tennis-doc.tritechprime.com",
+                "X-Title": "tennis-doc-app",
             },
             json={
                 "model": model,
-                "input": text
+                "input": texts,
             },
         )
         response.raise_for_status()
         data = response.json()
 
-        return data["embeddings"][0]
+        if "data" not in data:
+            log.error(f"Respuesta inesperada de OpenRouter: {data}")
+            raise RuntimeError("La respuesta de embeddings no contiene 'data'")
 
-
-async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Genera embeddings para una lista de textos."""
-    embeddings = []
-    for text in texts:
-        embedding = await get_embedding(text)
-        embeddings.append(embedding)
-    return embeddings
+        return [item["embedding"] for item in data["data"]]
