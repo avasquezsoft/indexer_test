@@ -9,20 +9,20 @@ async def get_embedding(text: str) -> list[float]:
 
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
-            f"{api_base}/embeddings",
+            f"{api_base}/embed",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
                 "model": model,
-                "prompt": text   # 🔥 clave: no es "input"
+                "input": text
             },
         )
         response.raise_for_status()
         data = response.json()
 
-        return data["embedding"]  # 🔥 clave
+        return data["embeddings"][0]
 
 
 async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
