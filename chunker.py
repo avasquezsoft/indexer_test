@@ -1,10 +1,10 @@
 import os
 import re
 
-# Tamaño máximo de un chunk en caracteres (aumentado para capturar queries SQL completas)
-CHUNK_SIZE = 2500
+# Tamaño máximo de un chunk en caracteres (subido para clases Java largas y queries SQL)
+CHUNK_SIZE = 6000
 # Overlap entre chunks para no perder contexto
-CHUNK_OVERLAP = 300
+CHUNK_OVERLAP = 400
 
 
 def chunk_file(content: str, file_path: str, repo: str, branch: str = "HEAD") -> list[dict]:
@@ -40,29 +40,80 @@ def _split_by_logical_blocks(content: str, file_path: str, repo: str, branch: st
     if language == "json":
         return _split_by_json_objects(content, file_path, repo, branch)
 
-    if language in ("python", "javascript", "typescript", "java", "csharp", "go"):
+    if language == "java":
+        return _split_by_java_members(content, file_path, repo, branch)
+
+    if language in ("python", "javascript", "typescript", "csharp", "go"):
         return _split_by_functions(content, file_path, repo, branch, language)
 
     return None
 
 
 def _split_by_sql_statements(content: str, file_path: str, repo: str, branch: str) -> list[dict]:
-    """Divide SQL por sentencias (terminadas en ;) respetando bloques PL/SQL."""
-    # Regex que busca ; al final de línea, pero evita cortar dentro de BEGIN...END
-    pattern = re.compile(r"^\s*(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|SELECT|WITH|BEGIN|DECLARE|MERGE)", re.IGNORECASE)
+    """
+    Divide SQL por sentencias (terminadas en ;).
+    Respeta bloques PL/SQL (BEGIN...END) y no corta dentro de strings ni comentarios.
+    """
+    # Palabras que inician una sentencia
+    stmt_start_re = re.compile(
+        r"^\s*(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|SELECT|WITH|BEGIN|DECLARE|MERGE|SET|GRANT|REVOKE|EXEC|CALL|COMMENT|TRUNCATE|ANALYZE|EXPLAIN|DESCRIBE|SHOW)",
+        re.IGNORECASE,
+    )
+
     lines = content.split("\n")
     split_indices = [0]
 
     in_plsql_block = 0
+    in_string = False
+    string_char = None
+    in_line_comment = False
+    in_block_comment = False
+
     for i, line in enumerate(lines):
         stripped = line.strip().upper()
-        if stripped.startswith("BEGIN"):
-            in_plsql_block += 1
-        elif stripped == "END" or stripped.startswith("END;"):
-            in_plsql_block = max(0, in_plsql_block - 1)
 
-        if i > 0 and in_plsql_block == 0 and pattern.match(line) and ";" in line:
-            split_indices.append(i)
+        # Contar BEGIN/END solo fuera de strings y comentarios
+        if not in_string and not in_line_comment and not in_block_comment:
+            if stripped.startswith("BEGIN"):
+                in_plsql_block += 1
+            elif stripped == "END" or stripped.startswith("END;") or stripped.startswith("END "):
+                in_plsql_block = max(0, in_plsql_block - 1)
+
+        # Detectar fin de sentencia por ; al final de línea (fuera de strings/comentarios)
+        # Hacemos un scan rápido de la línea para ver si hay un ; "real"
+        has_real_semicolon = False
+        j = 0
+        while j < len(line):
+            ch = line[j]
+            if in_block_comment:
+                if ch == "*" and j + 1 < len(line) and line[j + 1] == "/":
+                    in_block_comment = False
+                    j += 1
+            elif in_line_comment:
+                pass  # hasta fin de línea
+            elif in_string:
+                if ch == "\\" and j + 1 < len(line):
+                    j += 1
+                elif ch == string_char:
+                    in_string = False
+                    string_char = None
+            else:
+                if ch == "'" or ch == '"':
+                    in_string = True
+                    string_char = ch
+                elif ch == "-" and j + 1 < len(line) and line[j + 1] == "-":
+                    in_line_comment = True
+                elif ch == "/" and j + 1 < len(line) and line[j + 1] == "*":
+                    in_block_comment = True
+                    j += 1
+                elif ch == ";":
+                    has_real_semicolon = True
+            j += 1
+
+        in_line_comment = False  # resetea por línea
+
+        if i > 0 and in_plsql_block == 0 and has_real_semicolon:
+            split_indices.append(i + 1)  # cortar DESPUÉS de esta línea
 
     if len(split_indices) <= 1:
         return _split_by_size(content, file_path, repo, branch, "sql")
@@ -74,7 +125,10 @@ def _split_by_tags(content: str, file_path: str, repo: str, branch: str, languag
     """Divide HTML/XML/JSP por etiquetas de cierre de bloque."""
     lines = content.split("\n")
     split_indices = [0]
-    block_end_pattern = re.compile(r"^\s*</(div|section|article|table|tr|form|body|html|head|component|template|mapper|beans|bean|servlet|filter)\s*>", re.IGNORECASE)
+    block_end_pattern = re.compile(
+        r"^\s*</(div|section|article|table|tr|form|body|html|head|component|template|mapper|beans|bean|servlet|filter|script|style)\s*>",
+        re.IGNORECASE,
+    )
 
     for i, line in enumerate(lines):
         if i > 0 and block_end_pattern.match(line):
@@ -118,7 +172,6 @@ def _split_by_json_objects(content: str, file_path: str, repo: str, branch: str)
                     bracket_depth -= 1
 
         if i > 0 and brace_depth == 0 and bracket_depth == 0 and not in_string:
-            # Intentar cortar después de objetos completos
             stripped = line.strip()
             if stripped.endswith(",") or stripped.endswith("}") or stripped.endswith("]"):
                 split_indices.append(i + 1)
@@ -129,13 +182,56 @@ def _split_by_json_objects(content: str, file_path: str, repo: str, branch: str)
     return _build_chunks_from_indices(lines, split_indices, file_path, repo, branch, "json")
 
 
+def _split_by_java_members(content: str, file_path: str, repo: str, branch: str) -> list[dict]:
+    """
+    Divide archivos Java por miembros (métodos, campos, clases, interfaces).
+    Asegura que las anotaciones (@Query, @Autowired, etc.) queden en el mismo chunk
+    que el miembro que las sigue.
+    """
+    lines = content.split("\n")
+    split_indices = [0]
+    pending_annotation_idx = None
+
+    # Palabras que indican inicio de declaración de miembro/clase
+    member_start_re = re.compile(
+        r"^\s*(public|private|protected|static|final|abstract|synchronized|native|strictfp|default|volatile|transient|class|interface|enum|record|import|package)\b"
+    )
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # Saltar líneas vacías y comentarios sueltos
+        if not stripped or stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+            continue
+
+        # Acumular anotaciones
+        if stripped.startswith("@"):
+            if pending_annotation_idx is None:
+                pending_annotation_idx = i
+            continue
+
+        # Detectar inicio de miembro/clase
+        if member_start_re.match(line):
+            start_idx = pending_annotation_idx if pending_annotation_idx is not None else i
+            if start_idx > 0 and start_idx not in split_indices:
+                split_indices.append(start_idx)
+            pending_annotation_idx = None
+        else:
+            # Si había anotaciones sueltas y no van seguidas de miembro, descartarlas
+            pending_annotation_idx = None
+
+    if len(split_indices) <= 1:
+        return _split_by_size(content, file_path, repo, branch, "java")
+
+    return _build_chunks_from_indices(lines, split_indices, file_path, repo, branch, "java")
+
+
 def _split_by_functions(content: str, file_path: str, repo: str, branch: str, language: str) -> list[dict]:
     """Divide buscando definiciones de funciones/clases."""
     patterns = {
         "python": r"^(class |def |\s{0,4}def |\s{0,4}async def )",
         "javascript": r"^(function |const \w+ = |export (default |async )?function |class )",
         "typescript": r"^(function |const \w+ = |export (default |async )?function |class |interface |type \w+ =)",
-        "java": r"^\s*(public|private|protected|static).*\{$",
         "csharp": r"^\s*(public|private|protected|static).*\{$",
         "go": r"^func ",
     }
@@ -242,7 +338,7 @@ def _make_chunk(content: str, file_path: str, repo: str, branch: str, language: 
             "file_path": file_path,
             "language": language,
             "position": position,
-            # Texto enriquecido para el embedding: incluye repo + rama + ruta para dar contexto
+            # Texto enriquecido para el embedding: incluye repo + rama + ruta + lenguaje para dar contexto
             "embed_text": f"Repository: {repo}\nBranch: {branch}\nFile: {file_path}\nLanguage: {language}\n\n{content}",
         },
     }

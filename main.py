@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 
@@ -20,6 +21,66 @@ log = logging.getLogger(__name__)
 
 # Regex simple para validar formato org/repo
 _REPO_PATTERN = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+# Detecta referencias a archivos .sql dentro de strings (Java, XML, properties, etc.)
+_SQL_REF_RE = re.compile(r'["\']([^"\']*\.sql)["\']', re.IGNORECASE)
+
+
+def _resolve_sql_path(java_file_path: str, sql_ref: str, all_file_paths: set[str]) -> str | None:
+    """
+    Resuelve una referencia relativa a un archivo SQL dentro del repo.
+    Prueba: relativo al archivo Java, luego en resources, luego por nombre.
+    """
+    sql_ref = sql_ref.lstrip("/")
+
+    # 1) Relativo al directorio del archivo Java
+    java_dir = os.path.dirname(java_file_path)
+    candidate = os.path.join(java_dir, sql_ref).replace("\\", "/")
+    if candidate in all_file_paths:
+        return candidate
+
+    # 2) Bajo src/main/resources o src/test/resources (classpath)
+    for prefix in ("src/main/resources/", "src/test/resources/", "resources/", ""):
+        candidate = prefix + sql_ref
+        if candidate in all_file_paths:
+            return candidate
+
+    # 3) Buscar por nombre exacto en cualquier parte del repo
+    sql_basename = os.path.basename(sql_ref)
+    for path in all_file_paths:
+        if path.endswith("/" + sql_basename) or path == sql_basename:
+            return path
+
+    return None
+
+
+async def _inline_sql_references(
+    chunks: list[dict],
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    all_file_paths: set[str],
+    sql_files_map: dict[str, dict],
+) -> list[dict]:
+    """
+    Busca referencias a archivos .sql dentro de los chunks y adjunta
+    el contenido SQL al mismo chunk (text + embed_text).
+    """
+    for chunk in chunks:
+        for match in _SQL_REF_RE.finditer(chunk["text"]):
+            sql_ref = match.group(1)
+            resolved = _resolve_sql_path(chunk["metadata"]["file_path"], sql_ref, all_file_paths)
+            if resolved and resolved in sql_files_map:
+                try:
+                    sql_content = get_file_content(token, owner, repo, resolved, ref=branch)
+                    if sql_content and sql_content.strip():
+                        sql_header = f"\n\n-- Referenced SQL: {resolved} --\n"
+                        chunk["text"] += sql_header + sql_content
+                        chunk["metadata"]["embed_text"] += sql_header + sql_content
+                except Exception as exc:
+                    log.debug(f"No se pudo leer SQL referenciado {resolved}: {exc}")
+    return chunks
 
 
 # ─────────────────────────────────────────
@@ -103,26 +164,41 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
         # Borrar solo los chunks de esta rama para no afectar otras ramas indexadas
         delete_repo_chunks(client, QDRANT_COLLECTION, full_repo_name, branch=branch)
 
+        all_file_paths = {f["path"] for f in files}
+        sql_files_map = {f["path"]: f for f in files if f["path"].lower().endswith(".sql")}
+        log.info(f"Archivos SQL detectados en el repo: {len(sql_files_map)}")
+
         total_chunks = 0
+        total_files = 0
         for file_info in files:
             try:
                 content = get_file_content(token, owner, repo, file_info["path"], ref=branch)
                 if not content or not content.strip():
+                    log.debug(f"Archivo vacío o sin contenido: {file_info['path']}")
                     continue
 
                 chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
                 if not chunks:
+                    log.warning(f"Sin chunks para {file_info['path']} (tamaño {len(content)} chars)")
                     continue
+
+                # Si es Java, resolver referencias a SQL inline
+                if file_info["path"].lower().endswith(".java") and sql_files_map:
+                    chunks = await _inline_sql_references(
+                        chunks, token, owner, repo, branch, all_file_paths, sql_files_map
+                    )
 
                 texts = [c["metadata"]["embed_text"] for c in chunks]
                 embeddings = await get_embeddings_batch(texts)
                 upsert_chunks(client, QDRANT_COLLECTION, chunks, embeddings)
                 total_chunks += len(chunks)
+                total_files += 1
+                log.info(f"Indexado {file_info['path']}: {len(content)} chars → {len(chunks)} chunks")
             except Exception as exc:
                 log.warning(f"Error procesando {file_info['path']} en {full_repo_name}: {exc}")
                 continue
 
-        log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_chunks} chunks guardados")
+        log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_chunks} chunks guardados")
 
     except Exception as e:
         log.error(f"Error indexando {full_repo_name} @ {branch}: {e}")
@@ -174,6 +250,59 @@ async def search(req: SearchRequest):
     client = get_client()
     results = search_chunks(client, QDRANT_COLLECTION, query_vector, req.repo, req.branch, req.limit)
     return {"results": results}
+
+
+# ─────────────────────────────────────────
+# Endpoints de diagnóstico
+# ─────────────────────────────────────────
+
+@app.get("/debug/files")
+async def debug_files(repo: str, branch: str = "HEAD"):
+    """Lista los archivos que serían indexados (sin indexar)."""
+    try:
+        owner, repo_name = repo.split("/", 1)
+        token = get_installation_token()
+        files = get_repo_files(token, owner, repo_name, ref=branch)
+        return {"repo": repo, "branch": branch, "file_count": len(files), "files": [f["path"] for f in files]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/debug/chunks")
+async def debug_chunks(repo: str, file_path: str, branch: str = "HEAD"):
+    """Muestra los chunks guardados en Qdrant para un archivo específico."""
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        client = get_client()
+        must = [
+            FieldCondition(key="repo", match=MatchValue(value=repo)),
+            FieldCondition(key="branch", match=MatchValue(value=branch)),
+            FieldCondition(key="file_path", match=MatchValue(value=file_path)),
+        ]
+        results = client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=Filter(must=must),
+            limit=50,
+            with_payload=True,
+        )
+        points = results[0]
+        return {
+            "repo": repo,
+            "branch": branch,
+            "file_path": file_path,
+            "chunk_count": len(points),
+            "chunks": [
+                {
+                    "id": str(p.id),
+                    "language": p.payload.get("language"),
+                    "position": p.payload.get("position"),
+                    "text_preview": p.payload.get("text", "")[:500],
+                }
+                for p in points
+            ],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ─────────────────────────────────────────
