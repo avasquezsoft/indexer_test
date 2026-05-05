@@ -6,9 +6,10 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+from io import BytesIO
 
 from github_client import get_installation_token, get_repo_files, get_file_content
 from chunker import chunk_file
@@ -250,6 +251,108 @@ async def search(req: SearchRequest):
     client = get_client()
     results = search_chunks(client, QDRANT_COLLECTION, query_vector, req.repo, req.branch, req.limit)
     return {"results": results}
+
+
+# ─────────────────────────────────────────
+# Generación de PDF
+# ─────────────────────────────────────────
+
+_NOTO_REG_URL = "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"
+_NOTO_BOLD_URL = "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf"
+_NOTO_REG_PATH = "/tmp/NotoSans-Regular.ttf"
+_NOTO_BOLD_PATH = "/tmp/NotoSans-Bold.ttf"
+
+try:
+    from fpdf import FPDF
+    _HAS_FPDF = True
+except ImportError:
+    _HAS_FPDF = False
+    log.warning("fpdf2 no está instalado. El endpoint /pdf no funcionará.")
+
+
+def _ensure_noto_fonts():
+    if not _HAS_FPDF:
+        return
+    try:
+        if not os.path.exists(_NOTO_REG_PATH):
+            urllib.request.urlretrieve(_NOTO_REG_URL, _NOTO_REG_PATH)
+        if not os.path.exists(_NOTO_BOLD_PATH):
+            urllib.request.urlretrieve(_NOTO_BOLD_URL, _NOTO_BOLD_PATH)
+    except Exception as exc:
+        log.debug(f"No se pudieron descargar fuentes Noto: {exc}")
+
+
+class _PDF(FPDF):
+    def __init__(self, title: str = "Documento"):
+        super().__init__()
+        self.doc_title = title
+
+    def header(self):
+        has_noto = os.path.exists(_NOTO_REG_PATH)
+        self.set_font("NotoSans" if has_noto else "Helvetica", "B", 14)
+        self.cell(0, 10, self.doc_title, ln=True, align="C")
+        self.ln(4)
+
+    def footer(self):
+        self.set_y(-15)
+        has_noto = os.path.exists(_NOTO_REG_PATH)
+        self.set_font("NotoSans" if has_noto else "Helvetica", "", 8)
+        self.cell(0, 10, f"Pagina {self.page_no()}", align="C")
+
+
+class PdfRequest(BaseModel):
+    title: str = "Documento"
+    content: str
+    repo: str | None = None
+    branch: str | None = None
+
+
+@app.post("/pdf")
+async def generate_pdf(req: PdfRequest):
+    """Genera un PDF a partir de markdown/texto plano."""
+    if not _HAS_FPDF:
+        raise HTTPException(status_code=501, detail="fpdf2 no está instalado")
+
+    _ensure_noto_fonts()
+
+    pdf = _PDF(title=req.title)
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    has_noto = os.path.exists(_NOTO_REG_PATH)
+    if has_noto:
+        pdf.add_font("NotoSans", "", _NOTO_REG_PATH, uni=True)
+        pdf.add_font("NotoSans", "B", _NOTO_BOLD_PATH, uni=True)
+
+    for raw_line in req.content.split("\n"):
+        line = raw_line.rstrip()
+        if not line:
+            pdf.ln(3)
+            continue
+
+        if line.startswith("# "):
+            pdf.set_font("NotoSans" if has_noto else "Helvetica", "B", 16)
+            pdf.multi_cell(0, 8, line[2:])
+        elif line.startswith("## "):
+            pdf.set_font("NotoSans" if has_noto else "Helvetica", "B", 13)
+            pdf.multi_cell(0, 7, line[3:])
+        elif line.startswith("### "):
+            pdf.set_font("NotoSans" if has_noto else "Helvetica", "B", 11)
+            pdf.multi_cell(0, 6, line[4:])
+        else:
+            pdf.set_font("NotoSans" if has_noto else "Helvetica", "", 10)
+            pdf.multi_cell(0, 5, line)
+
+    output = BytesIO()
+    pdf.output(output)
+    output.seek(0)
+
+    filename = f"{req.title.replace(' ', '_')}.pdf"
+    return StreamingResponse(
+        output,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ─────────────────────────────────────────
