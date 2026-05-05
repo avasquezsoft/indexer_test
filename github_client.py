@@ -8,12 +8,25 @@ from config import (
     GITHUB_APP_PRIVATE_KEY,
 )
 
-# Extensiones de archivo que indexamos
+# Extensiones de archivo que indexamos — incluye código, queries, configs, planillas y recursos web
 SUPPORTED_EXTENSIONS = {
+    # Lenguajes principales
     ".py", ".js", ".ts", ".jsx", ".tsx",
     ".java", ".cs", ".go", ".rb", ".php",
     ".sql", ".graphql", ".proto",
-    ".md", ".txt"
+    ".md", ".txt",
+    # Web / planillas / recursos
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".json", ".xml", ".yaml", ".yml",
+    ".properties", ".conf", ".cfg", ".ini",
+    ".jsp", ".jspf", ".tag",
+    ".vue", ".svelte",
+    ".ftl", ".hbs", ".mustache", ".twig",
+    # Shell / scripts
+    ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+    # Otros configs / docs
+    ".dockerfile", ".env", ".gitignore", ".gitattributes",
+    ".sql", ".plsql", ".pks", ".pkb",  # más variantes SQL/PLSQL
 }
 
 # Archivos y carpetas que ignoramos

@@ -1,7 +1,7 @@
 """
 title: Tennis Doc RAG
 author: Tritech Prime
-version: 1.1
+version: 1.2
 description: >
   Inyecta automáticamente contexto del código fuente indexado en cada conversación.
   Detecta repositorios y ramas mencionados en la pregunta. Rama por defecto: prod.
@@ -10,7 +10,6 @@ description: >
 
 import re
 import requests
-from typing import Optional
 
 # Regex para detectar formato org/repo en cualquier parte del mensaje
 _REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
@@ -22,46 +21,54 @@ class Filter:
     def __init__(self):
         self.name = "Tennis Doc RAG"
         self.valves = self.Valves()
+        print("[TennisDoc RAG] Filter cargado correctamente")
 
     class Valves:
         def __init__(self):
-            # URL del servicio indexer dentro de la red de Docker Compose
             self.indexer_url = "http://indexer:8001"
-            # Cantidad de chunks a recuperar por cada pregunta
             self.limit = 6
-            # Rama por defecto cuando el usuario no la especifica
             self.default_branch = "prod"
 
-    def inlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
-        """
-        Se ejecuta ANTES de enviar los mensajes al LLM.
-        Busca contexto relevante en el indexer y lo inyecta como mensaje de sistema.
-        """
-        messages = body.get("messages", [])
-        if not messages:
-            return body
-
-        last_msg = messages[-1]
-        if last_msg.get("role") != "user":
-            return body
-
-        query = last_msg.get("content", "").strip()
-        if not query:
-            return body
-
-        # ── Comando especial: indexar un repo desde el chat ──
-        lower_q = query.lower()
-        if lower_q.startswith(("indexa ", "indexar ", "reindexa ", "reindexar ", "index ")):
-            args = query.split(" ", 1)[1].strip() if " " in query else ""
-            parts = args.split()
-            repo = parts[0] if parts else ""
-            branch = parts[1] if len(parts) > 1 else "HEAD"
-            if repo:
-                return self._trigger_index(body, repo, branch)
-
-        # ── RAG automático: detectar repo/rama y buscar contexto ──
-        repo, branch = self._extract_repo_branch(query)
+    def inlet(self, body: dict, user: dict = None) -> dict:
+        """Se ejecuta ANTES de enviar los mensajes al LLM."""
         try:
+            messages = body.get("messages", [])
+            if not messages:
+                return body
+
+            last_msg = messages[-1]
+            if last_msg.get("role") != "user":
+                return body
+
+            # El contenido puede ser string o lista (si tiene attachments)
+            raw_content = last_msg.get("content", "")
+            if isinstance(raw_content, list):
+                # Extraer solo el texto del primer elemento
+                query = str(raw_content[0].get("text", "")).strip() if raw_content else ""
+            else:
+                query = str(raw_content).strip()
+
+            if not query:
+                return body
+
+            print(f"[TennisDoc RAG] Query recibida: {query[:80]}...")
+
+            # ── Comando especial: indexar un repo desde el chat ──
+            lower_q = query.lower()
+            index_commands = ("indexa ", "indexar ", "reindexa ", "reindexar ", "index ")
+            if lower_q.startswith(index_commands):
+                args = query.split(" ", 1)[1].strip() if " " in query else ""
+                parts = args.split()
+                repo = parts[0] if parts else ""
+                branch = parts[1] if len(parts) > 1 else "HEAD"
+                if repo:
+                    print(f"[TennisDoc RAG] Comando index detectado: {repo} @ {branch}")
+                    return self._trigger_index(body, repo, branch)
+
+            # ── RAG automático: detectar repo/rama y buscar contexto ──
+            repo, branch = self._extract_repo_branch(query)
+            print(f"[TennisDoc RAG] Buscando contexto | repo={repo} | branch={branch}")
+
             payload = {"query": query, "limit": self.valves.limit}
             if repo:
                 payload["repo"] = repo
@@ -76,6 +83,7 @@ class Filter:
             )
             resp.raise_for_status()
             results = resp.json().get("results", [])
+            print(f"[TennisDoc RAG] Chunks encontrados: {len(results)}")
 
             if results:
                 context = self._build_context(results)
@@ -90,28 +98,25 @@ class Filter:
                         f"{context}"
                     ),
                 }
-                # Insertar justo antes del último mensaje del usuario
                 messages.insert(-1, system_msg)
                 body["messages"] = messages
+
         except Exception as e:
-            print(f"[TennisDoc RAG] Error buscando contexto: {e}")
+            print(f"[TennisDoc RAG] ERROR en inlet: {e}")
+            # En caso de error, devolvemos el body sin modificar para no romper el chat
 
         return body
 
-    def _extract_repo_branch(self, query: str) -> tuple[Optional[str], str]:
-        """Extrae repo (org/repo) y rama del query. Si no hay rama explícita, usa default_branch."""
-        # Buscar repos mencionados
+    def _extract_repo_branch(self, query: str):
+        """Extrae repo (org/repo) y rama del query."""
         repos = _REPO_RE.findall(query)
         repo = repos[0] if repos else None
-
-        # Buscar rama explícita
         branch_match = _BRANCH_RE.search(query)
         branch = branch_match.group(1) if branch_match else self.valves.default_branch
-
         return repo, branch
 
     def _trigger_index(self, body: dict, repo: str, branch: str = "HEAD") -> dict:
-        """Dispara la indexación de un repo (rama opcional) y reemplaza el mensaje del usuario con una confirmación."""
+        """Dispara la indexación y reemplaza el mensaje del usuario con una confirmación."""
         try:
             payload = {"repo": repo, "branch": branch}
             resp = requests.post(
@@ -126,10 +131,12 @@ class Filter:
                 f"Estado: {data.get('status', 'ok')}. "
                 f"Por favor espera unos minutos y luego haz tu pregunta sobre ese repositorio."
             )
+            print(f"[TennisDoc RAG] Indexación iniciada: {repo} @ {branch}")
         except Exception as e:
             body["messages"][-1]["content"] = (
                 f"[Sistema interno] Error al iniciar indexación de `{repo}` @ `{branch}`: {e}"
             )
+            print(f"[TennisDoc RAG] ERROR indexando: {e}")
         return body
 
     def _build_context(self, results: list) -> str:
