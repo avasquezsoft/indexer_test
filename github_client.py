@@ -118,7 +118,7 @@ def get_repo_files(token: str, owner: str, repo: str, ref: str = "HEAD") -> list
     return files
 
 
-def get_file_content(token: str, owner: str, repo: str, path: str) -> str | None:
+def get_file_content(token: str, owner: str, repo: str, path: str, ref: str = "HEAD") -> str | None:
     """Descarga el contenido de un archivo."""
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         response = client.get(
@@ -128,6 +128,7 @@ def get_file_content(token: str, owner: str, repo: str, path: str) -> str | None
                 "Accept": "application/vnd.github.raw+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
+            params={"ref": ref},
         )
         if response.status_code == 200:
             return response.text

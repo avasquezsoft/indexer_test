@@ -70,13 +70,14 @@ def ensure_collection(client: QdrantClient, collection: str):
 
 
 
-def delete_repo_chunks(client: QdrantClient, collection: str, repo: str):
-    """Elimina todos los chunks de un repo antes de re-indexar."""
+def delete_repo_chunks(client: QdrantClient, collection: str, repo: str, branch: str | None = None):
+    """Elimina todos los chunks de un repo (opcionalmente filtrado por rama)."""
+    conditions = [FieldCondition(key="repo", match=MatchValue(value=repo))]
+    if branch:
+        conditions.append(FieldCondition(key="branch", match=MatchValue(value=branch)))
     client.delete(
         collection_name=collection,
-        points_selector=Filter(
-            must=[FieldCondition(key="repo", match=MatchValue(value=repo))]
-        ),
+        points_selector=Filter(must=conditions),
     )
 
 
@@ -90,6 +91,7 @@ def upsert_chunks(client: QdrantClient, collection: str, chunks: list[dict], emb
                 vector=embedding,
                 payload={
                     "repo": chunk["metadata"]["repo"],
+                    "branch": chunk["metadata"]["branch"],
                     "file_path": chunk["metadata"]["file_path"],
                     "language": chunk["metadata"]["language"],
                     "position": chunk["metadata"]["position"],
@@ -107,13 +109,15 @@ def upsert_chunks(client: QdrantClient, collection: str, chunks: list[dict], emb
         )
 
 
-def search_chunks(client: QdrantClient, collection: str, query_vector: list[float], repo_filter: str | None = None, limit: int = 6) -> list[dict]:
+def search_chunks(client: QdrantClient, collection: str, query_vector: list[float], repo_filter: str | None = None, branch_filter: str | None = None, limit: int = 6) -> list[dict]:
     """Busca los chunks más relevantes para un vector de consulta."""
-    query_filter = None
+    conditions = []
     if repo_filter:
-        query_filter = Filter(
-            must=[FieldCondition(key="repo", match=MatchValue(value=repo_filter))]
-        )
+        conditions.append(FieldCondition(key="repo", match=MatchValue(value=repo_filter)))
+    if branch_filter:
+        conditions.append(FieldCondition(key="branch", match=MatchValue(value=branch_filter)))
+
+    query_filter = Filter(must=conditions) if conditions else None
 
     results = client.search(
         collection_name=collection,
@@ -127,6 +131,7 @@ def search_chunks(client: QdrantClient, collection: str, query_vector: list[floa
         {
             "score": r.score,
             "repo": r.payload["repo"],
+            "branch": r.payload.get("branch", ""),
             "file_path": r.payload["file_path"],
             "language": r.payload["language"],
             "text": r.payload["text"],

@@ -7,7 +7,7 @@ CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
 
 
-def chunk_file(content: str, file_path: str, repo: str) -> list[dict]:
+def chunk_file(content: str, file_path: str, repo: str, branch: str = "HEAD") -> list[dict]:
     """
     Divide un archivo en chunks con metadata.
     Intenta dividir por funciones/clases cuando es posible,
@@ -18,19 +18,19 @@ def chunk_file(content: str, file_path: str, repo: str) -> list[dict]:
 
     # Para archivos pequeños, un solo chunk
     if len(content) <= CHUNK_SIZE:
-        return [_make_chunk(content, file_path, repo, language, 0)]
+        return [_make_chunk(content, file_path, repo, branch, language, 0)]
 
     # Intentar dividir por bloques lógicos según el lenguaje
     if language in ("python", "javascript", "typescript", "java", "csharp", "go"):
-        chunks = _split_by_functions(content, file_path, repo, language)
+        chunks = _split_by_functions(content, file_path, repo, branch, language)
         if chunks:
             return chunks
 
     # Fallback: dividir por tamaño con overlap
-    return _split_by_size(content, file_path, repo, language)
+    return _split_by_size(content, file_path, repo, branch, language)
 
 
-def _split_by_functions(content: str, file_path: str, repo: str, language: str) -> list[dict]:
+def _split_by_functions(content: str, file_path: str, repo: str, branch: str, language: str) -> list[dict]:
     """Divide buscando definiciones de funciones/clases."""
     patterns = {
         "python": r"^(class |def |\s{0,4}def |\s{0,4}async def )",
@@ -62,15 +62,15 @@ def _split_by_functions(content: str, file_path: str, repo: str, language: str) 
 
         # Si el bloque es muy grande, subdividirlo
         if len(block) > CHUNK_SIZE * 2:
-            sub = _split_by_size(block, file_path, repo, language)
+            sub = _split_by_size(block, file_path, repo, branch, language)
             chunks.extend(sub)
         elif block:
-            chunks.append(_make_chunk(block, file_path, repo, language, start))
+            chunks.append(_make_chunk(block, file_path, repo, branch, language, start))
 
     return chunks
 
 
-def _split_by_size(content: str, file_path: str, repo: str, language: str) -> list[dict]:
+def _split_by_size(content: str, file_path: str, repo: str, branch: str, language: str) -> list[dict]:
     """Divide por tamaño con overlap."""
     chunks = []
     start = 0
@@ -88,7 +88,7 @@ def _split_by_size(content: str, file_path: str, repo: str, language: str) -> li
                 end = start + last_newline
 
         if chunk_text.strip():
-            chunks.append(_make_chunk(chunk_text.strip(), file_path, repo, language, chunk_index))
+            chunks.append(_make_chunk(chunk_text.strip(), file_path, repo, branch, language, chunk_index))
 
         start = end - CHUNK_OVERLAP
         chunk_index += 1
@@ -96,17 +96,18 @@ def _split_by_size(content: str, file_path: str, repo: str, language: str) -> li
     return chunks
 
 
-def _make_chunk(content: str, file_path: str, repo: str, language: str, position: int) -> dict:
+def _make_chunk(content: str, file_path: str, repo: str, branch: str, language: str, position: int) -> dict:
     """Crea un chunk con toda la metadata necesaria para la búsqueda."""
     return {
         "text": content,
         "metadata": {
             "repo": repo,
+            "branch": branch,
             "file_path": file_path,
             "language": language,
             "position": position,
-            # Texto enriquecido para el embedding: incluye la ruta para dar contexto
-            "embed_text": f"Repository: {repo}\nFile: {file_path}\n\n{content}",
+            # Texto enriquecido para el embedding: incluye repo + rama + ruta para dar contexto
+            "embed_text": f"Repository: {repo}\nBranch: {branch}\nFile: {file_path}\n\n{content}",
         },
     }
 

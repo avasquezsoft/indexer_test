@@ -71,15 +71,16 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
     event = request.headers.get("X-GitHub-Event", "")
     payload = await request.json()
 
-    # Solo procesamos push a la rama principal
+    # Solo procesamos push a la rama que se especificó
     if event == "push":
         repo_name = payload.get("repository", {}).get("full_name", "")
         ref = payload.get("ref", "")
         default_branch = payload.get("repository", {}).get("default_branch", "main")
 
-        if ref == f"refs/heads/{default_branch}" and repo_name:
-            log.info(f"Push detectado en {repo_name} — iniciando re-indexación")
-            background_tasks.add_task(index_repo, repo_name)
+        if ref.startswith("refs/heads/") and repo_name:
+            branch = ref.replace("refs/heads/", "")
+            log.info(f"Push detectado en {repo_name} @ {branch} — iniciando re-indexación")
+            background_tasks.add_task(index_repo, repo_name, branch)
 
     return JSONResponse({"status": "ok"})
 
@@ -88,28 +89,28 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 # Indexación de un repo completo
 # ─────────────────────────────────────────
 
-async def index_repo(full_repo_name: str):
-    """Indexa todos los archivos de un repo. Corre en background."""
+async def index_repo(full_repo_name: str, branch: str = "HEAD"):
+    """Indexa todos los archivos de un repo (rama específica). Corre en background."""
     try:
         owner, repo = full_repo_name.split("/", 1)
-        log.info(f"Indexando {full_repo_name}...")
+        log.info(f"Indexando {full_repo_name} @ {branch}...")
 
         token = get_installation_token()
-        files = get_repo_files(token, owner, repo)
-        log.info(f"Encontrados {len(files)} archivos en {full_repo_name}")
+        files = get_repo_files(token, owner, repo, ref=branch)
+        log.info(f"Encontrados {len(files)} archivos en {full_repo_name} @ {branch}")
 
         client = get_client()
-        # Borrar chunks anteriores de este repo para re-indexar limpio
-        delete_repo_chunks(client, QDRANT_COLLECTION, full_repo_name)
+        # Borrar solo los chunks de esta rama para no afectar otras ramas indexadas
+        delete_repo_chunks(client, QDRANT_COLLECTION, full_repo_name, branch=branch)
 
         total_chunks = 0
         for file_info in files:
             try:
-                content = get_file_content(token, owner, repo, file_info["path"])
+                content = get_file_content(token, owner, repo, file_info["path"], ref=branch)
                 if not content or not content.strip():
                     continue
 
-                chunks = chunk_file(content, file_info["path"], full_repo_name)
+                chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
                 if not chunks:
                     continue
 
@@ -121,10 +122,10 @@ async def index_repo(full_repo_name: str):
                 log.warning(f"Error procesando {file_info['path']} en {full_repo_name}: {exc}")
                 continue
 
-        log.info(f"Indexación completa: {full_repo_name} — {total_chunks} chunks guardados")
+        log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_chunks} chunks guardados")
 
     except Exception as e:
-        log.error(f"Error indexando {full_repo_name}: {e}")
+        log.error(f"Error indexando {full_repo_name} @ {branch}: {e}")
 
 
 # ─────────────────────────────────────────
@@ -132,7 +133,8 @@ async def index_repo(full_repo_name: str):
 # ─────────────────────────────────────────
 
 class IndexRequest(BaseModel):
-    repo: str  # formato: "org/repo-name"
+    repo: str    # formato: "org/repo-name"
+    branch: str = "HEAD"  # rama a indexar (por defecto la default del repo)
 
     @field_validator("repo")
     @classmethod
@@ -144,9 +146,9 @@ class IndexRequest(BaseModel):
 
 @app.post("/index")
 async def manual_index(req: IndexRequest, background_tasks: BackgroundTasks):
-    """Dispara indexación manual de un repo."""
-    background_tasks.add_task(index_repo, req.repo)
-    return {"status": "indexación iniciada", "repo": req.repo}
+    """Dispara indexación manual de un repo (rama opcional)."""
+    background_tasks.add_task(index_repo, req.repo, req.branch)
+    return {"status": "indexación iniciada", "repo": req.repo, "branch": req.branch}
 
 
 # ─────────────────────────────────────────
@@ -155,7 +157,8 @@ async def manual_index(req: IndexRequest, background_tasks: BackgroundTasks):
 
 class SearchRequest(BaseModel):
     query: str
-    repo: str | None = None  # si se omite, busca en todos los repos
+    repo: str | None = None     # si se omite, busca en todos los repos
+    branch: str | None = None   # si se omite, busca en todas las ramas del repo
     limit: int = 6
 
 
@@ -169,7 +172,7 @@ async def search(req: SearchRequest):
         raise HTTPException(status_code=502, detail="Error al generar el embedding")
 
     client = get_client()
-    results = search_chunks(client, QDRANT_COLLECTION, query_vector, req.repo, req.limit)
+    results = search_chunks(client, QDRANT_COLLECTION, query_vector, req.repo, req.branch, req.limit)
     return {"results": results}
 
 
