@@ -1,7 +1,7 @@
 """
 title: Tennis Doc RAG
 author: Tritech Prime
-version: 1.4
+version: 1.5
 description: >
   Inyecta automáticamente contexto del código fuente indexado en cada conversación.
   Detecta repositorios y ramas mencionados en la pregunta. Rama por defecto: prod.
@@ -19,6 +19,8 @@ _REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 _BRANCH_RE = re.compile(r"(?:rama|branch)\s+(\S+)", re.IGNORECASE)
 # Regex para detectar solicitud de PDF
 _PDF_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?pdf", re.IGNORECASE)
+# Regex para detectar solicitud de Markdown / archivo MD
+_MD_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?(?:archivo\s+)?(?:markdown|md|\.md)", re.IGNORECASE)
 # Palabras que indican que el usuario busca implementación/código
 _IMPL_KEYWORDS = re.compile(
     r"\b(m[oó]dulo|module|implementaci[oó]n|implementation|expl[íi]came|explica|c[oó]mo\s+funciona|queries?|sql|dao|repositorio|service|servicio|m[eé]todos?|clase|class|business\s+logic|l[oó]gica)\b",
@@ -101,6 +103,11 @@ class Filter:
                     print(f"[TennisDoc RAG] Comando index detectado: {repo} @ {branch}")
                     return self._trigger_index(body, repo, branch)
 
+            # ── Generar Markdown con contexto de chunks ──
+            if _MD_RE.search(query):
+                repo, branch = self._extract_repo_branch(query)
+                return self._generate_markdown(body, repo, branch, query)
+
             # ── Generar PDF de la última respuesta del asistente ──
             if _PDF_RE.search(query):
                 repo, branch = self._extract_repo_branch(query)
@@ -181,6 +188,83 @@ class Filter:
                 f"[Sistema interno] Error al iniciar indexación de `{repo}` @ `{branch}`: {e}"
             )
             print(f"[TennisDoc RAG] ERROR indexando: {e}")
+        return body
+
+    def _generate_markdown(self, body: dict, repo: str | None, branch: str | None, query: str) -> dict:
+        """Busca chunks, arma un markdown estructurado y lo ofrece como descarga."""
+        try:
+            search_query = self._enrich_query(query)
+            print(f"[TennisDoc RAG] Generando MD | repo={repo} | branch={branch}")
+
+            payload = {"query": search_query, "limit": self.valves.limit}
+            if repo:
+                payload["repo"] = repo
+            if branch:
+                payload["branch"] = branch
+
+            resp = requests.post(
+                f"{self.valves.indexer_url}/search",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            print(f"[TennisDoc RAG] Chunks para MD: {len(results)}")
+
+            if not results:
+                body["messages"][-1]["content"] = "No encontré chunks para generar el archivo Markdown. Intenta con una pregunta más específica o verifica que el repo esté indexado."
+                return body
+
+            # Armar markdown
+            lines = [f"# Contexto de código: {repo or 'Todos los repos'}", ""]
+            if branch:
+                lines.append(f"**Rama:** {branch}")
+                lines.append("")
+            lines.append(f"**Query original:** {query}")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+            for i, r in enumerate(results, 1):
+                score = r.get("score", 0)
+                file_path = r.get("file_path", "unknown")
+                language = r.get("language", "text")
+                text = r.get("text", "")
+                lines.append(f"## Fragmento {i} (score: {score:.3f})")
+                lines.append(f"- **Archivo:** `{file_path}`")
+                lines.append(f"- **Lenguaje:** {language}")
+                lines.append("")
+                lines.append(f"```{language}")
+                lines.append(text)
+                lines.append("```")
+                lines.append("")
+                lines.append("---")
+                lines.append("")
+
+            md_content = "\n".join(lines)
+            title = f"Contexto_{repo.replace('/', '_')}" if repo else "Contexto_Codigo"
+
+            resp = requests.post(
+                f"{self.valves.indexer_url}/markdown",
+                json={"title": title, "content": md_content, "repo": repo, "branch": branch},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            md_bytes = resp.content
+            md_b64 = base64.b64encode(md_bytes).decode("utf-8")
+
+            download_link = f'<a href="data:text/markdown;base64,{md_b64}" download="{title}.md">📄 Descargar Markdown</a>'
+
+            body["messages"][-1]["content"] = (
+                f"He generado un archivo Markdown con {len(results)} fragmentos de código recuperados. "
+                f"Haz clic para descargarlo:\n\n{download_link}"
+            )
+            print(f"[TennisDoc RAG] Markdown generado: {title}.md ({len(md_bytes)} bytes)")
+        except Exception as e:
+            body["messages"][-1]["content"] = f"[Sistema] Error generando Markdown: {e}"
+            print(f"[TennisDoc RAG] ERROR generando Markdown: {e}")
         return body
 
     def _generate_pdf(self, body: dict, repo: str, branch: str) -> dict:

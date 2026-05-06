@@ -384,6 +384,39 @@ async def generate_pdf(req: PdfRequest):
 
 
 # ─────────────────────────────────────────
+# Generación de Markdown descargable
+# ─────────────────────────────────────────
+
+class MarkdownRequest(BaseModel):
+    title: str = "Documento"
+    content: str
+    repo: str | None = None
+    branch: str | None = None
+
+
+@app.post("/markdown")
+async def generate_markdown(req: MarkdownRequest):
+    """Genera un archivo .md descargable a partir de contenido markdown."""
+    filename = f"{req.title.replace(' ', '_')}.md"
+    # Añadir metadatos YAML frontmatter si se proporciona repo/rama
+    frontmatter = ""
+    if req.repo or req.branch:
+        frontmatter = "---\n"
+        if req.repo:
+            frontmatter += f"repo: {req.repo}\n"
+        if req.branch:
+            frontmatter += f"branch: {req.branch}\n"
+        frontmatter += "---\n\n"
+
+    full_content = frontmatter + req.content
+    return StreamingResponse(
+        BytesIO(full_content.encode("utf-8")),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─────────────────────────────────────────
 # Endpoints de diagnóstico
 # ─────────────────────────────────────────
 
