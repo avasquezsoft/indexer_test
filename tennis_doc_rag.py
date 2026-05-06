@@ -1,7 +1,7 @@
 """
 title: Tennis Doc RAG
 author: Tritech Prime
-version: 1.5
+version: 1.6
 description: >
   Inyecta automáticamente contexto del código fuente indexado en cada conversación.
   Detecta repositorios y ramas mencionados en la pregunta. Rama por defecto: prod.
@@ -28,6 +28,11 @@ _IMPL_KEYWORDS = re.compile(
 )
 # Extrae posibles nombres de módulo de un path tipo "foo/bar/module-name"
 _MODULE_PATH_RE = re.compile(r"[\w-]+/[\w-]+/([\w-]+)")
+# Detecta nombres de clases Java en la query (ej: ConsultarInventarioVtexServiceImpl)
+_CLASS_NAME_RE = re.compile(r"\b([A-Z][a-zA-Z0-9]*(?:Impl|Dao|Service|Repository|Mapper|Controller|Dto|Entity|Config|Util|Factory|Handler|Listener|Task|Job|Batch|Processor|Writer|Reader|Interceptor|Filter|Servlet|Endpoint|Client|Provider|Delegate|Adapter|Facade|Builder|Validator|Converter|Formatter|Parser|Renderer|Generator|Exporter|Importer|Scheduler|Monitor|Tracker|Logger|Auditor|Security|Session|Token|Resolver|Locator|Registry|Cache|Pool|Queue|Stack|Map|Tree|Graph|Node|Connection|Transaction|Context|Event|Message|Command|Query|Request|Response|Result|Source|Target|Reference|Wrapper|Proxy|Stub|Mock|Spy|Matcher|Verifier|Checker|Tester|Inspector|Reviewer|Normalizer|Sanitizer|Cleaner|Splitter|Joiner|Merger|Sorter|Ranker|Scorer|Evaluator|Calculator|Computer|Estimator|Predictor|Classifier|Clusterer|Finder|Searcher|Indexer|Extractor|Loader|Saver|Persister|Retriever|Updater|Deleter|Creator|Destroyer|Initializer|Finalizer|Activator|Deactivator|Enabler|Disabler|Opener|Closer|Starter|Stopper|Launcher|Runner|Executor|Invoker|Caller|Dispatcher|Router|Balancer|Distributor|Allocator|Assigner|Configurer|Setter|Getter|Accessor|Mutator|Builder|Maker|Producer|Consumer|Subscriber|Publisher|Emitter|Receiver|Sender|Transmitter|Broadcaster|Multicaster|Peer|Host|Guest|Client|Server|Master|Slave|Primary|Secondary|Main|Auxiliary|Helper|Utility|Tool|Kit|Lib|Api|Sdk|Cli|Gui|Ui|Web|Rest|Soap|Grpc|Graphql|Websocket|Socket|Port|Channel|Pipe|Stream|Flow|Pipeline|Chain|Sequence|Series|Batch|Bundle|Pack|Package|Module|Component|Part|Piece|Section|Segment|Fragment|Chunk|Block|Unit|Item|Element|Member|Field|Property|Attribute|Parameter|Argument|Option|Setting|Configuration|Preference|Policy|Rule|Strategy|Pattern|Template|Schema|Model|Blueprint|Plan|Design|Layout|Structure|Framework|Platform|System|Engine|Kernel|Core|Base|Root|Foundation|Layer|Tier|Level|Stage|Phase|Step|Action|Operation|Process|Procedure|Routine|Function|Method|Subroutine|Macro|Script|Program|Application|App|Service|Microservice|Daemon|Agent|Bot|Worker|Thread|Task|Job|Process|Instance|Object|Bean|Component|Module|Plugin|Extension|Addon|Integration|Connector|Bridge|Gateway|Proxy|Tunnel|Vpn|Firewall|Shield|Guard|Watcher|Observer|Listener|Monitor|Sensor|Detector|Analyzer|Scanner|Probe|Tracer|Tracker|Logger|Recorder|Collector|Aggregator|Compiler|Interpreter|Translator|Converter|Adapter|Wrapper|Facade|Delegate|Proxy|Stub|Mock|Fake|Dummy|Spy|Captor|Matcher|Verifier|Asserter|Checker|Tester|Inspector|Reviewer|Auditor|Validator|Sanitizer|Normalizer|Formatter|Parser|Lexer|Tokenizer|Splitter|Joiner|Merger|Combiner|Mixer|Blender|Fusion|Integration|Unification|Composition|Aggregation|Association|Relation|Link|Reference|Pointer|Handle|Descriptor|Metadata|Annotation|Tag|Label|Marker|Flag|Indicator|Signal|Trigger|Event|Notification|Alert|Warning|Error|Exception|Failure|Fault|Defect|Bug|Issue|Ticket|Case|Scenario|Story|Epic|Saga|Transaction|Session|Conversation|Dialog|Chat|Message|Mail|Letter|Note|Memo|Document|Record|Entry|Log|History|Audit|Trail|Trace|Track|Path|Route|Way|Road|Street|Avenue|Boulevard|Highway|Freeway|Motorway|Turnpike|Tollway|Expressway|Parkway|Driveway|Walkway|Pathway|Trail|Track|Trace|Line|Route|Circuit|Loop|Ring|Circle|Cycle|Orbit|Spiral|Helix|Coil|Twist|Turn|Bend|Curve|Arc|Bow|Arch|Vault|Dome|Canopy|Cover|Roof|Ceiling|Top|Peak|Summit|Crest|Ridge|Range|Chain|Series|Sequence|Succession|Progression|Line|Row|Rank|File|Column|Pillar|Post|Pole|Shaft|Stem|Trunk|Stock|Root|Base|Foundation|Foot|Bottom|Floor|Ground|Soil|Earth|Land|Terrain|Territory|Country|Nation|State|Province|Region|Zone|Area|District|Quarter|Neighborhood|Vicinity|Locality|Place|Spot|Site|Position|Location|Situation|Station|Post|Base|Camp|Settlement|Colony|Outpost|Hub|Center|Core|Heart|Middle|Midst|Interior|Inside|Within|Inner|Internal|Inward|Central|Focal|Key|Main|Primary|Principal|Chief|Leading|First|Prime|Premier|Head|Top|Upper|Higher|Superior|Supreme|Ultimate|Final|Last|Ultimate|Extreme|Utmost|Maximum|Maximal|Peak|Top|Crest|Summit|Apex|Vertex|Zenith|Acme|Pinnacle|Climax|Culmination|Crown|Cap|Tip|Point|Dot|Spot|Speck|Grain|Particle|Atom|Molecule|Cell|Unit|Element|Component|Constituent|Ingredient|Factor|Aspect|Feature|Characteristic|Property|Attribute|Quality|Trait|Mark|Sign|Indication|Evidence|Proof|Token|Symbol|Emblem|Badge|Banner|Flag|Standard|Colors|Insignia|Regalia|Trappings|Gear|Equipment|Apparatus|Instrument|Tool|Implement|Device|Gadget|Contraption|Machine|Engine|Motor|Mechanism|Appliance|Utensil|Vessel|Container|Receptacle|Holder|Carrier|Bearer|Conveyor|Transporter|Vehicle|Vessel|Craft|Ship|Boat|Ferry|Barge|Yacht|Cruiser|Liner|Tanker|Carrier|Freighter|Cargo|Hauler|Tractor|Truck|Van|Bus|Coach|Car|Automobile|Vehicle|Ride|Wheel|Cycle|Bike|Motorcycle|Scooter|Moped|Segway|Hoverboard|Skateboard|Rollerblade|Ski|Snowboard|Sled|Sleigh|Carriage|Chariot|Wagon|Cart|Buggy|Coach|Sedan|Limousine|Cab|Taxi|Hack|Jitney|Rickshaw|Tuk-tuk|Bicycle|Tricycle|Unicycle|Quadracycle|Velomobile|Recumbent|Tandem|Surrey|Buckboard|Dogcart|Trap|Gig|Cabriolet|Landau|Brougham|Berlin|Coupe|Sedan|Saloon|Hatchback|Station|Wagon|Estate|Minivan|Minibus|Microbus|Van|Camper|RV|Motorhome|Trailer|Caravan|Fifth|Wheel|Popup|Tent|Teardrop|Airstream|Bus|Coach|Autobus|Omnibus|Trolley|Tram|Streetcar|Trolleybus|Trackless|Trolley|Subway|Metro|Underground|Tube|Rail|Train|Locomotive|Engine|Railcar|Carriage|Coach|Wagon|Caboose|Boxcar|Flatcar|Tank|Car|Hopper|Gondola|Reefer|Stock|Auto|Rack|Intermodal|Well|Container|Bulkhead|Centerbeam|Covered|Open|Skeleton|Depressed|Clearance|Lowboy|Stretch|Double|Triple|Extendable|Drop|Deck|Step|Deck|RGN|Removable|Gooseneck|Platform|Pallet|Skid|Stillage|Cage|Crate|Box|Case|Carton|Package|Parcel|Packet|Pouch|Bag|Sack|Barrel|Drum|Keg|Cask|Firkin|Hogshead|Puncheon|Tierce|Pipe|Butt|Barrel|Cask|Vat|Tun|Tank|Cistern|Reservoir|Basin|Pool|Pond|Lake|Lagoon|Loch|Fjord|Inlet|Cove|Bay|Gulf|Bight|Sound|Strait|Channel|Passage|Narrows|Throat|Gap|Break|Ravine|Gorge|Canyon|Valley|Dale|Vale|Glen|Hollow|Depression|Basin|Bowl|Crater|Caldera|Cavity|Hole|Opening|Aperture|Vent|Port|Gate|Door|Entry|Entrance|Access|Approach|Way|Path|Route|Road|Street|Avenue|Boulevard|Drive|Lane|Alley|Court|Place|Terrace|Plaza|Square|Circle|Loop|Crescent|Heights|Hills|Ridge|Peak|Summit|Crest|View|Outlook|Overlook|Vista|Panorama|Scene|Sight|Spectacle|Display|Show|Exhibition|Exhibit|Presentation|Demonstration|Performance|Production|Entertainment|Amusement|Recreation|Pastime|Hobby|Diversion|Distraction|Relaxation|Rest|Repose|Respite|Relief|Ease|Comfort|Solace|Consolation|Support|Aid|Help|Assistance|Service|Favor|Kindness|Goodwill|Benevolence|Charity|Philanthropy|Humanitarianism|Altruism|Selflessness|Generosity|Liberality|Munificence|Magnanimity|Nobility|Honor|Integrity|Probity|Rectitude|Righteousness|Virtue|Goodness|Morality|Ethics|Principles|Standards|Values|Beliefs|Convictions|Tenets|Doctrines|Dogmas|Creeds|Catechisms|Canons|Laws|Rules|Regulations|Statutes|Ordinances|Decrees|Edicts|Proclamations|Declarations|Announcements|Notifications|Notices|Bulletins|Communications|Messages|Memoranda|Minutes|Records|Archives|Annals|Chronicles|Histories|Accounts|Narratives|Stories|Tales|Legends|Sagas|Myths|Fables|Parables|Allegories|Metaphors|Similes|Analogies|Comparisons|Contrasts|Juxtapositions|Oppositions|Differences|Distinctions|Variations|Divergences|Deviations|Departures|Digressions|Tangents|Excursions|Forays|Sorties|Sallies|Raids|Incursions|Invasions|Attacks|Assaults|Offensives|Drives|Pushes|Thrusts|Lunges|Strikes|Hits|Blows|Knocks|Thumps|Bangs|Slams|Cracks|Snaps|Pops|Clicks|Clacks|Clinks|Chinks|Tinks|Jingles|Rings|Tolls|Peals|Chimes|Carillons|Knells|Bongs|Booms|Roars|Thunders|Claps|Crackles|Rustles|Whispers|Murmurs|Mumbles|Mutters|Grumbles|Growls|Snarls|Barks|Yaps|Yips|Yelps|Howls|Wails|Moans|Groans|Sighs|Gasps|Pants|Puffs|Huffs|Blasts|Gusts|Winds|Breezes|Zephyrs|Drafts|Currents|Streams|Flows|Floods|Torrents|Rivers|Brooks|Creeks|Rills|Runs|Springs|Wells|Fountains|Geysers|Spouts|Jets|Sprays|Mists|Fogs|Clouds|Hazes|Smogs|Vapors|Steams|Smokes|Fumes|Exhausts|Emissions|Discharges|Releases|Emissions|Effluents|Outflows|Runoffs|Spills|Leaks|Seepages|Oozings|Drips|Drops|Droplets|Beads|Blobs|Globs|Lumps|Chunks|Hunks|Blocks|Bricks|Cakes|Bars|Rods|Sticks|Strips|Bands|Ribbons|Tapes|Films|Membranes|Skins|Hides|Pelts|Furs|Coats|Jackets|Vests|Waistcoats|Shirts|Blouses|Tops|Tees|Tanks|Camisoles|Bras|Bandeaus|Bustiers|Corsets|Basques|Bodies|TeddIES|Negligees|Nightgowns|Nighties|Nightshirts|Pajamas|Pyjamas|Jammies|Sleepers|Onesies|Rompers|Jumpsuits|Coveralls|Overalls|Dungarees|Jeans|Trousers|Pants|Slacks|Chinos|Khakis|Cords|Cords|Shorts|Bermudas|Cutoffs|Trunks|Boxers|Briefs|Undies|Underpants|Panties|Thongs|G-strings|Jockstraps|Athletic|Supporters|Cups|Guards|Protectors|Shields|Pads|Armor|Plates|Vests|Helmets|Hats|Caps|Bonnets|Berets|Beanies|Toques|Tam|o'|Shanters|Balmorals|Glengarries|Caubeens|Busbies|Shakos|Kepis|Forage|Caps|Peaked|Caps|Service|Caps|Field|Caps|Patrol|Caps|Baseball|Caps|Snapbacks|Trucker|Caps|Bucket|Hats|Sun|Hats|Sombreros|Panamas|Fedora|Trilby|Homburg|Porkpie|Bowler|Derby|Top|Hats|Stovepipes|Coachmen|Hats|Astrakhan|Bearskins|Busby|Shako|Pickelhaube|Spiked|Helmet|Sallet|Burgonet|Armet|Close|Helmet|Great|Helmet|Grand|Helmet|Frog-|mouth|Helmet|Bascinet|Cervelliere|Nasal|Helmet|Spangenhelm|Lamellar|Helmet|Scale|Helmet|Lamellar|Corselet|Brigandine|Coat|of|Plates|Jack|of|Plates|Transitional|Cuirass|Breastplate|Backplate|Fauld|Tasset|Culet|Plackart|Besagew|Rerebrace|Vambrace|Gauntlet|Couter|Spaulder|Pauldron|Gorget|Buffe|Falling|Buff|Bevor|Chin|Guard|Ventail|Aventail|Camail|Standard|Gardbrace|Pasguard|Grandguard|Wrapper|Buff|Coat|Doublet|Pourpoint|Aketon|Gambeson|Arming|Doublet|Hauberk|Byrnie|Lorica|Hamata|Lorica|Squamata|Lorica|Segmentata|Laminar|Armor|Laminar|Cuisses|Poleyns|Greaves|Sabatons|Sollaret|Solleret))\b")
+
+# Detecta palabras que indican implementación concreta (Impl, Dao, Service, etc.)
+_IMPL_SUFFIX_RE = re.compile(r"\b([A-Z][a-zA-Z0-9]*(?:Impl|Dao|Service|Repository|Mapper|Controller))\b")
 
 
 class Filter:
@@ -118,24 +123,93 @@ class Filter:
             search_query = self._enrich_query(query)
             print(f"[TennisDoc RAG] Buscando contexto | repo={repo} | branch={branch} | enriched_query={search_query[:100]}...")
 
-            payload = {"query": search_query, "limit": self.valves.limit}
-            if repo:
-                payload["repo"] = repo
-            if branch:
-                payload["branch"] = branch
+            all_results = []
 
-            resp = requests.post(
-                f"{self.valves.indexer_url}/search",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            results = resp.json().get("results", [])
-            print(f"[TennisDoc RAG] Chunks encontrados: {len(results)}")
+            # 1) Búsqueda aumentada: archivos completos (no solo top chunks)
+            try:
+                payload = {
+                    "query": search_query,
+                    "repo": repo,
+                    "branch": branch,
+                    "max_files": 5,
+                    "vector_limit": 50,
+                }
+                resp = requests.post(
+                    f"{self.valves.indexer_url}/search-augmented",
+                    json={k: v for k, v in payload.items() if v is not None},
+                    headers={"Content-Type": "application/json"},
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                all_results = data.get("results", [])
+                print(f"[TennisDoc RAG] Búsqueda aumentada: {len(all_results)} chunks de {data.get('files_fetched', 0)} archivos")
+            except Exception as e:
+                print(f"[TennisDoc RAG] Fallback a /search: {e}")
+                # Fallback a búsqueda normal
+                payload = {"query": search_query, "limit": self.valves.limit}
+                if repo:
+                    payload["repo"] = repo
+                if branch:
+                    payload["branch"] = branch
+                resp = requests.post(
+                    f"{self.valves.indexer_url}/search",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                all_results = resp.json().get("results", [])
 
-            if results:
-                context = self._build_context(results)
+            # 2) Si la query menciona nombres de clase específicos, traer esos archivos directo
+            class_names = _CLASS_NAME_RE.findall(query)
+            if class_names and repo:
+                for class_name in class_names[:3]:
+                    try:
+                        # Buscar en Qdrant por file_path que contenga el nombre de clase
+                        resp = requests.get(
+                            f"{self.valves.indexer_url}/debug/files-indexed",
+                            params={"repo": repo, "branch": branch or self.valves.default_branch},
+                            timeout=10,
+                        )
+                        resp.raise_for_status()
+                        files = resp.json().get("files", [])
+                        matches = [f for f in files if class_name in f]
+                        for file_path in matches[:2]:
+                            try:
+                                fetch_resp = requests.post(
+                                    f"{self.valves.indexer_url}/fetch-file",
+                                    json={"repo": repo, "file_path": file_path, "branch": branch or self.valves.default_branch},
+                                    headers={"Content-Type": "application/json"},
+                                    timeout=10,
+                                )
+                                fetch_resp.raise_for_status()
+                                fdata = fetch_resp.json()
+                                all_results.append({
+                                    "score": 1.0,
+                                    "repo": repo,
+                                    "branch": branch or self.valves.default_branch,
+                                    "file_path": file_path,
+                                    "language": "java",
+                                    "text": fdata.get("content", ""),
+                                })
+                                print(f"[TennisDoc RAG] Fetch directo: {file_path}")
+                            except Exception as fe:
+                                print(f"[TennisDoc RAG] Error fetch {file_path}: {fe}")
+                    except Exception as ce:
+                        print(f"[TennisDoc RAG] Error buscando clase {class_name}: {ce}")
+
+            if all_results:
+                # Eliminar duplicados por file_path + position (o text si no hay position)
+                seen = set()
+                deduped = []
+                for r in all_results:
+                    key = (r.get("file_path"), r.get("text", "")[:100])
+                    if key not in seen:
+                        seen.add(key)
+                        deduped.append(r)
+
+                context = self._build_context(deduped)
                 scope = f"Repo: {repo} | Rama: {branch}" if repo else f"Todas las ramas (filtro: {branch})"
                 system_msg = {
                     "role": "system",
@@ -203,10 +277,10 @@ class Filter:
                 payload["branch"] = branch
 
             resp = requests.post(
-                f"{self.valves.indexer_url}/search",
+                f"{self.valves.indexer_url}/search-augmented",
                 json=payload,
                 headers={"Content-Type": "application/json"},
-                timeout=15,
+                timeout=20,
             )
             resp.raise_for_status()
             results = resp.json().get("results", [])

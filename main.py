@@ -282,6 +282,148 @@ async def search(req: SearchRequest):
 
 
 # ─────────────────────────────────────────
+# Búsqueda aumentada: archivos completos
+# ─────────────────────────────────────────
+
+class SearchAugmentedRequest(BaseModel):
+    query: str
+    repo: str | None = None
+    branch: str | None = None
+    max_files: int = 5       # cuántos archivos completos traer
+    vector_limit: int = 50   # cuántos chunks vectoriales usar para identificar archivos
+
+
+@app.post("/search-augmented")
+async def search_augmented(req: SearchAugmentedRequest):
+    """
+    Búsqueda híbrida:
+    1. Busca vectorialmente para identificar los archivos más relevantes.
+    2. Trae TODOS los chunks de esos archivos (no solo los top-K).
+    """
+    log.info(f"Búsqueda aumentada: query='{req.query[:60]}...' repo={req.repo} branch={req.branch}")
+
+    try:
+        query_vector = await get_embedding(req.query)
+    except Exception as exc:
+        log.error(f"Error generando embedding: {exc}")
+        raise HTTPException(status_code=502, detail=f"Error al generar el embedding: {exc}")
+
+    client = get_client()
+
+    # 1) Búsqueda vectorial amplia para identificar archivos candidatos
+    try:
+        vector_results = search_chunks(
+            client, QDRANT_COLLECTION, query_vector,
+            req.repo, req.branch, req.vector_limit,
+        )
+    except Exception as exc:
+        log.error(f"Error en búsqueda vectorial: {exc}")
+        raise HTTPException(status_code=500, detail=f"Error en búsqueda Qdrant: {exc}")
+
+    if not vector_results:
+        return {"results": [], "files_fetched": 0}
+
+    # 2) Agrupar por file_path y puntuar archivos (suma de scores)
+    from collections import defaultdict
+    file_scores = defaultdict(float)
+    for r in vector_results:
+        file_scores[r["file_path"]] += r["score"]
+
+    top_files = sorted(file_scores.items(), key=lambda x: x[1], reverse=True)[:req.max_files]
+    log.info(f"Archivos más relevantes: {[f[0] for f in top_files]}")
+
+    # 3) Traer TODOS los chunks de cada archivo top
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    all_chunks = []
+    for file_path, _ in top_files:
+        must = [
+            FieldCondition(key="repo", match=MatchValue(value=req.repo)) if req.repo else None,
+            FieldCondition(key="branch", match=MatchValue(value=req.branch)) if req.branch else None,
+            FieldCondition(key="file_path", match=MatchValue(value=file_path)),
+        ]
+        must = [c for c in must if c is not None]
+
+        offset = None
+        file_chunks = []
+        while True:
+            results = client.scroll(
+                collection_name=QDRANT_COLLECTION,
+                scroll_filter=Filter(must=must),
+                limit=100,
+                offset=offset,
+                with_payload=True,
+            )
+            if hasattr(results, 'points'):
+                points = results.points
+                offset = results.next_page_offset
+            else:
+                points = results[0]
+                offset = results[1]
+
+            if not points:
+                break
+
+            for p in points:
+                file_chunks.append({
+                    "score": 0.0,
+                    "repo": p.payload.get("repo"),
+                    "branch": p.payload.get("branch", ""),
+                    "file_path": p.payload.get("file_path"),
+                    "language": p.payload.get("language"),
+                    "text": p.payload.get("text", ""),
+                })
+
+            if offset is None:
+                break
+
+        # Ordenar chunks por posición para reconstruir el archivo en orden
+        file_chunks.sort(key=lambda x: x.get("position", 0))
+        all_chunks.extend(file_chunks)
+
+    log.info(f"Búsqueda aumentada completada: {len(all_chunks)} chunks de {len(top_files)} archivos")
+    return {"results": all_chunks, "files_fetched": len(top_files)}
+
+
+# ─────────────────────────────────────────
+# Fetch directo de archivo desde GitHub
+# ─────────────────────────────────────────
+
+class FetchFileRequest(BaseModel):
+    repo: str
+    file_path: str
+    branch: str = "HEAD"
+
+
+@app.post("/fetch-file")
+async def fetch_file(req: FetchFileRequest):
+    """Trae el contenido crudo de un archivo específico desde GitHub."""
+    try:
+        owner, repo_name = req.repo.split("/", 1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="repo debe tener formato 'org/repo'")
+
+    token = get_installation_token()
+    try:
+        content = get_file_content(token, owner, repo_name, req.file_path, ref=req.branch)
+    except GitHubTokenExpired:
+        token = get_installation_token()
+        content = get_file_content(token, owner, repo_name, req.file_path, ref=req.branch)
+    except Exception as exc:
+        log.error(f"Error fetching {req.file_path}: {exc}")
+        raise HTTPException(status_code=502, detail=f"Error al obtener archivo de GitHub: {exc}")
+
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"Archivo no encontrado: {req.file_path}")
+
+    return {
+        "repo": req.repo,
+        "branch": req.branch,
+        "file_path": req.file_path,
+        "content": content,
+    }
+
+
+# ─────────────────────────────────────────
 # Generación de PDF
 # ─────────────────────────────────────────
 
