@@ -123,15 +123,16 @@ def search_chunks(client: QdrantClient, collection: str, query_vector: list[floa
     query_filter = Filter(must=conditions) if conditions else None
 
     try:
-        results = client.search(
+        response = client.query_points(
             collection_name=collection,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=query_filter,
             limit=limit,
             with_payload=True,
         )
+        results = response.points
     except Exception as exc:
-        log.error(f"Error en Qdrant search: {exc}")
+        log.error(f"Error en Qdrant query_points: {exc}")
         raise
 
     output = []
