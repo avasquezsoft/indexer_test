@@ -1,8 +1,9 @@
 import os
 import re
 
-# Tamaño máximo de un chunk en caracteres (subido para clases Java largas y queries SQL)
-CHUNK_SIZE = 6000
+# Tamaño máximo de un chunk en caracteres.
+# Si un archivo entero cabe aquí, NUNCA se divide. Va TODO junto en un solo chunk.
+CHUNK_SIZE = 8000
 # Overlap entre chunks para no perder contexto
 CHUNK_OVERLAP = 400
 
@@ -10,21 +11,22 @@ CHUNK_OVERLAP = 400
 def chunk_file(content: str, file_path: str, repo: str, branch: str = "HEAD") -> list[dict]:
     """
     Divide un archivo en chunks con metadata.
-    Intenta dividir por bloques lógicos según el tipo de archivo.
+    REGLA DE ORO: si el archivo entero cabe en CHUNK_SIZE, va en UN SOLO CHUNK.
+    Nunca partimos un archivo pequeño por "métodos" o "sentencias".
     """
     ext = os.path.splitext(file_path)[1].lower()
     language = _detect_language(ext)
 
-    # Para archivos pequeños, un solo chunk
+    # REGLA DE ORO: archivo pequeño → UN SOLO CHUNK con TODO el contenido
     if len(content) <= CHUNK_SIZE:
         return [_make_chunk(content, file_path, repo, branch, language, 0)]
 
-    # Dividir por bloques lógicos según el lenguaje
+    # Solo archivos REALMENTE grandes se dividen por bloques lógicos
     chunks = _split_by_logical_blocks(content, file_path, repo, branch, language)
     if chunks:
         return chunks
 
-    # Fallback: dividir por tamaño con overlap
+    # Fallback: dividir por tamaño con overlap (solo para archivos enormes sin estructura)
     return _split_by_size(content, file_path, repo, branch, language)
 
 
@@ -254,7 +256,9 @@ def _split_by_functions(content: str, file_path: str, repo: str, branch: str, la
 
 
 def _build_chunks_from_indices(lines: list[str], split_indices: list[int], file_path: str, repo: str, branch: str, language: str) -> list[dict]:
-    """Construye chunks a partir de índices de línea, subdividiendo bloques muy grandes."""
+    """Construye chunks a partir de índices de línea.
+    Si un bloque excede CHUNK_SIZE * 2, se subdivide PERO cada sub-chunk conserva
+    las primeras líneas del bloque (firma/encabezado) para no perder contexto."""
     chunks = []
     for idx, start in enumerate(split_indices):
         end = split_indices[idx + 1] if idx + 1 < len(split_indices) else len(lines)
@@ -263,12 +267,46 @@ def _build_chunks_from_indices(lines: list[str], split_indices: list[int], file_
         if not block:
             continue
 
-        # Si el bloque es muy grande, subdividirlo
-        if len(block) > CHUNK_SIZE * 2:
-            sub = _split_by_size(block, file_path, repo, branch, language)
-            chunks.extend(sub)
-        else:
+        if len(block) <= CHUNK_SIZE:
             chunks.append(_make_chunk(block, file_path, repo, branch, language, start))
+        elif len(block) <= CHUNK_SIZE * 2:
+            # Bloque mediano: un solo chunk aunque sea un poco grande
+            chunks.append(_make_chunk(block, file_path, repo, branch, language, start))
+        else:
+            # Bloque muy grande: subdividir con header de contexto
+            header_lines = lines[start : min(start + 5, end)]
+            header = "\n".join(header_lines).strip()
+            sub = _split_with_header(block, header, file_path, repo, branch, language, start)
+            chunks.extend(sub)
+
+    return chunks
+
+
+def _split_with_header(content: str, header: str, file_path: str, repo: str, branch: str, language: str, base_position: int) -> list[dict]:
+    """Divide un bloque grande en sub-chunks, añadiendo un header de contexto a cada uno."""
+    chunks = []
+    start = 0
+    chunk_index = 0
+
+    while start < len(content):
+        end = start + CHUNK_SIZE - len(header) - 50  # reservar espacio para header
+        if end <= start:
+            end = start + CHUNK_SIZE
+
+        chunk_text = content[start:end]
+
+        if end < len(content):
+            best_cut = _find_best_cut(chunk_text, language)
+            if best_cut > CHUNK_SIZE // 3:
+                chunk_text = chunk_text[:best_cut]
+                end = start + best_cut
+
+        full_text = f"{header}\n...\n{chunk_text.strip()}"
+        if full_text.strip():
+            chunks.append(_make_chunk(full_text.strip(), file_path, repo, branch, language, base_position + chunk_index))
+
+        start = end - CHUNK_OVERLAP
+        chunk_index += 1
 
     return chunks
 
