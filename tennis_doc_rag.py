@@ -1,7 +1,7 @@
 """
 title: Tennis Doc RAG
 author: Tritech Prime
-version: 1.3
+version: 1.4
 description: >
   Inyecta automáticamente contexto del código fuente indexado en cada conversación.
   Detecta repositorios y ramas mencionados en la pregunta. Rama por defecto: prod.
@@ -19,6 +19,13 @@ _REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 _BRANCH_RE = re.compile(r"(?:rama|branch)\s+(\S+)", re.IGNORECASE)
 # Regex para detectar solicitud de PDF
 _PDF_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?pdf", re.IGNORECASE)
+# Palabras que indican que el usuario busca implementación/código
+_IMPL_KEYWORDS = re.compile(
+    r"\b(m[oó]dulo|module|implementaci[oó]n|implementation|expl[íi]came|explica|c[oó]mo\s+funciona|queries?|sql|dao|repositorio|service|servicio|m[eé]todos?|clase|class|business\s+logic|l[oó]gica)\b",
+    re.IGNORECASE,
+)
+# Extrae posibles nombres de módulo de un path tipo "foo/bar/module-name"
+_MODULE_PATH_RE = re.compile(r"[\w-]+/[\w-]+/([\w-]+)")
 
 
 class Filter:
@@ -32,6 +39,31 @@ class Filter:
             self.indexer_url = "http://indexer:8001"
             self.limit = 12
             self.default_branch = "prod"
+
+    def _enrich_query(self, query: str) -> str:
+        """Enriquece la query del usuario con keywords técnicas para mejorar retrieval."""
+        if not _IMPL_KEYWORDS.search(query):
+            return query
+
+        enrichment = []
+
+        # Extraer posible nombre de módulo de paths mencionados
+        module_match = _MODULE_PATH_RE.search(query)
+        if module_match:
+            enrichment.append(module_match.group(1).replace("-", " "))
+
+        # Añadir keywords técnicas según lo que parece buscar
+        lower = query.lower()
+        if any(k in lower for k in ("query", "queries", "sql", "jpql", "select", "insert", "update")):
+            enrichment.extend(["SQL query", "database", "DAO", "implementation"])
+        if any(k in lower for k in ("módulo", "modulo", "module", "implementación", "implementation", "explícame", "explica", "cómo funciona")):
+            enrichment.extend(["Java class", "implementation", "methods", "business logic", "DAO", "service"])
+        if any(k in lower for k in ("dao", "repositorio", "repository")):
+            enrichment.extend(["DAO", "implementation", "database queries"])
+
+        if enrichment:
+            return f"{query} {' '.join(enrichment)}"
+        return query
 
     def inlet(self, body: dict, user: dict = None) -> dict:
         """Se ejecuta ANTES de enviar los mensajes al LLM."""
@@ -76,9 +108,10 @@ class Filter:
 
             # ── RAG automático: detectar repo/rama y buscar contexto ──
             repo, branch = self._extract_repo_branch(query)
-            print(f"[TennisDoc RAG] Buscando contexto | repo={repo} | branch={branch}")
+            search_query = self._enrich_query(query)
+            print(f"[TennisDoc RAG] Buscando contexto | repo={repo} | branch={branch} | enriched_query={search_query[:100]}...")
 
-            payload = {"query": query, "limit": self.valves.limit}
+            payload = {"query": search_query, "limit": self.valves.limit}
             if repo:
                 payload["repo"] = repo
             if branch:

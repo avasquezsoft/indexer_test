@@ -399,6 +399,56 @@ async def debug_files(repo: str, branch: str = "HEAD"):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/debug/files-indexed")
+async def debug_files_indexed(repo: str, branch: str = "HEAD", language: str | None = None):
+    """Lista los file_paths únicos que YA están indexados en Qdrant para un repo/rama."""
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        client = get_client()
+        must = [
+            FieldCondition(key="repo", match=MatchValue(value=repo)),
+            FieldCondition(key="branch", match=MatchValue(value=branch)),
+        ]
+        if language:
+            must.append(FieldCondition(key="language", match=MatchValue(value=language)))
+
+        all_paths = set()
+        offset = None
+        while True:
+            results = client.scroll(
+                collection_name=QDRANT_COLLECTION,
+                scroll_filter=Filter(must=must),
+                limit=1000,
+                offset=offset,
+                with_payload=True,
+            )
+            # Compatibilidad: scroll puede retornar tupla o objeto con .points / .next_page_offset
+            if hasattr(results, 'points'):
+                points = results.points
+                offset = results.next_page_offset
+            else:
+                points = results[0]
+                offset = results[1]
+            if not points:
+                break
+            for p in points:
+                path = p.payload.get("file_path")
+                if path:
+                    all_paths.add(path)
+            if offset is None:
+                break
+
+        return {
+            "repo": repo,
+            "branch": branch,
+            "language_filter": language,
+            "indexed_file_count": len(all_paths),
+            "files": sorted(list(all_paths)),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/debug/chunks")
 async def debug_chunks(repo: str, file_path: str, branch: str = "HEAD"):
     """Muestra los chunks guardados en Qdrant para un archivo específico."""
@@ -416,7 +466,11 @@ async def debug_chunks(repo: str, file_path: str, branch: str = "HEAD"):
             limit=50,
             with_payload=True,
         )
-        points = results[0]
+        # Compatibilidad: scroll puede retornar tupla o objeto con .points
+        if hasattr(results, 'points'):
+            points = results.points
+        else:
+            points = results[0]
         return {
             "repo": repo,
             "branch": branch,

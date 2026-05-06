@@ -368,6 +368,32 @@ def _find_best_cut(text: str, language: str) -> int:
 
 def _make_chunk(content: str, file_path: str, repo: str, branch: str, language: str, position: int) -> dict:
     """Crea un chunk con toda la metadata necesaria para la búsqueda."""
+    # Extraer nombre de clase/archivo sin extensión para enriquecer el embedding
+    basename = os.path.splitext(os.path.basename(file_path))[0]
+    # Palabras clave del path (carpetas) para contexto semántico adicional
+    path_keywords = " ".join(
+        os.path.dirname(file_path).replace("/", " ").replace("-", " ").replace("_", " ").split()
+    )
+
+    # Construir contexto semántico adicional según el tipo de archivo
+    extra_context = ""
+    if language == "java":
+        extra_context = f"Java class {basename}. Implementation. Business logic. "
+    elif language == "sql":
+        extra_context = f"SQL query {basename}. Database query. SELECT INSERT UPDATE DELETE. "
+    elif language in ("html", "jsp", "vue", "xml"):
+        extra_context = f"View template {basename}. Frontend UI. "
+
+    embed_text = (
+        f"Repository: {repo}\n"
+        f"Branch: {branch}\n"
+        f"File: {file_path}\n"
+        f"Module context: {path_keywords}\n"
+        f"Language: {language}\n"
+        f"{extra_context}\n"
+        f"{content}"
+    )
+
     return {
         "text": content,
         "metadata": {
@@ -376,8 +402,7 @@ def _make_chunk(content: str, file_path: str, repo: str, branch: str, language: 
             "file_path": file_path,
             "language": language,
             "position": position,
-            # Texto enriquecido para el embedding: incluye repo + rama + ruta + lenguaje para dar contexto
-            "embed_text": f"Repository: {repo}\nBranch: {branch}\nFile: {file_path}\nLanguage: {language}\n\n{content}",
+            "embed_text": embed_text,
         },
     }
 
