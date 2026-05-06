@@ -131,6 +131,11 @@ def get_repo_files(token: str, owner: str, repo: str, ref: str = "HEAD") -> list
     return files
 
 
+class GitHubTokenExpired(Exception):
+    """El token de instalación de GitHub expiró (401)."""
+    pass
+
+
 def get_file_content(token: str, owner: str, repo: str, path: str, ref: str = "HEAD") -> str | None:
     """Descarga el contenido de un archivo."""
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
@@ -145,4 +150,6 @@ def get_file_content(token: str, owner: str, repo: str, path: str, ref: str = "H
         )
         if response.status_code == 200:
             return response.text
+        if response.status_code == 401:
+            raise GitHubTokenExpired(f"Token expirado al leer {path}")
         return None

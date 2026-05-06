@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from io import BytesIO
 
-from github_client import get_installation_token, get_repo_files, get_file_content
+from github_client import get_installation_token, get_repo_files, get_file_content, GitHubTokenExpired
 from chunker import chunk_file
 from embedder import get_embedding, get_embeddings_batch
 from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks, ping_client
@@ -172,32 +172,49 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
         total_chunks = 0
         total_files = 0
         for file_info in files:
-            try:
-                content = get_file_content(token, owner, repo, file_info["path"], ref=branch)
-                if not content or not content.strip():
-                    log.debug(f"Archivo vacío o sin contenido: {file_info['path']}")
-                    continue
+            attempt = 0
+            max_token_retries = 2
+            processed = False
+            while attempt < max_token_retries and not processed:
+                try:
+                    content = get_file_content(token, owner, repo, file_info["path"], ref=branch)
+                    if not content or not content.strip():
+                        log.debug(f"Archivo vacío o sin contenido: {file_info['path']}")
+                        processed = True
+                        continue
 
-                chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
-                if not chunks:
-                    log.warning(f"Sin chunks para {file_info['path']} (tamaño {len(content)} chars)")
-                    continue
+                    chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
+                    if not chunks:
+                        log.warning(f"Sin chunks para {file_info['path']} (tamaño {len(content)} chars)")
+                        processed = True
+                        continue
 
-                # Si es Java, resolver referencias a SQL inline
-                if file_info["path"].lower().endswith(".java") and sql_files_map:
-                    chunks = await _inline_sql_references(
-                        chunks, token, owner, repo, branch, all_file_paths, sql_files_map
-                    )
+                    # Si es Java, resolver referencias a SQL inline
+                    if file_info["path"].lower().endswith(".java") and sql_files_map:
+                        chunks = await _inline_sql_references(
+                            chunks, token, owner, repo, branch, all_file_paths, sql_files_map
+                        )
 
-                texts = [c["metadata"]["embed_text"] for c in chunks]
-                embeddings = await get_embeddings_batch(texts)
-                upsert_chunks(client, QDRANT_COLLECTION, chunks, embeddings)
-                total_chunks += len(chunks)
-                total_files += 1
-                log.info(f"Indexado {file_info['path']}: {len(content)} chars → {len(chunks)} chunks")
-            except Exception as exc:
-                log.warning(f"Error procesando {file_info['path']} en {full_repo_name}: {exc}")
-                continue
+                    texts = [c["metadata"]["embed_text"] for c in chunks]
+                    embeddings = await get_embeddings_batch(texts)
+                    upsert_chunks(client, QDRANT_COLLECTION, chunks, embeddings)
+                    total_chunks += len(chunks)
+                    total_files += 1
+                    log.info(f"Indexado {file_info['path']}: {len(content)} chars → {len(chunks)} chunks")
+                    processed = True
+
+                except GitHubTokenExpired:
+                    attempt += 1
+                    if attempt < max_token_retries:
+                        log.warning(f"Token expirado procesando {file_info['path']}, renovando token ({attempt}/{max_token_retries})...")
+                        token = get_installation_token()
+                    else:
+                        log.error(f"Token sigue expirado después de {max_token_retries} intentos. Saltando {file_info['path']}")
+                        processed = True
+
+                except Exception as exc:
+                    log.warning(f"Error procesando {file_info['path']} en {full_repo_name}: {exc}")
+                    processed = True
 
         log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_chunks} chunks guardados")
 
