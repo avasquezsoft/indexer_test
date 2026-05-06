@@ -259,14 +259,25 @@ class SearchRequest(BaseModel):
 @app.post("/search")
 async def search(req: SearchRequest):
     """Busca chunks relevantes para una pregunta."""
+    log.info(f"Búsqueda recibida: query='{req.query[:60]}...' repo={req.repo} branch={req.branch} limit={req.limit}")
+
     try:
         query_vector = await get_embedding(req.query)
+        log.info(f"Embedding generado: dims={len(query_vector)} sample={query_vector[:3]}")
     except Exception as exc:
         log.error(f"Error generando embedding de búsqueda: {exc}")
-        raise HTTPException(status_code=502, detail="Error al generar el embedding")
+        raise HTTPException(status_code=502, detail=f"Error al generar el embedding: {exc}")
 
     client = get_client()
-    results = search_chunks(client, QDRANT_COLLECTION, query_vector, req.repo, req.branch, req.limit)
+    try:
+        results = search_chunks(client, QDRANT_COLLECTION, query_vector, req.repo, req.branch, req.limit)
+        log.info(f"Búsqueda completada: {len(results)} resultados")
+        for i, r in enumerate(results):
+            log.info(f"  Result {i+1}: score={r['score']:.3f} file={r['file_path'][:60]}")
+    except Exception as exc:
+        log.error(f"Error en búsqueda Qdrant: {exc}")
+        raise HTTPException(status_code=500, detail=f"Error en búsqueda Qdrant: {exc}")
+
     return {"results": results}
 
 

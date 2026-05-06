@@ -1,13 +1,15 @@
 """
 title: Tennis Doc RAG
 author: Tritech Prime
-version: 1.2
+version: 1.3
 description: >
   Inyecta automáticamente contexto del código fuente indexado en cada conversación.
   Detecta repositorios y ramas mencionados en la pregunta. Rama por defecto: prod.
-  Permite también disparar indexación escribiendo "indexa org/repo [rama]" en el chat.
+  Permite disparar indexación escribiendo "indexa org/repo [rama]" en el chat.
+  Permite generar PDFs de la última respuesta del asistente.
 """
 
+import base64
 import re
 import requests
 
@@ -15,6 +17,8 @@ import requests
 _REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 # Regex para detectar rama explícita: "rama X" o "branch X"
 _BRANCH_RE = re.compile(r"(?:rama|branch)\s+(\S+)", re.IGNORECASE)
+# Regex para detectar solicitud de PDF
+_PDF_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?pdf", re.IGNORECASE)
 
 
 class Filter:
@@ -26,7 +30,7 @@ class Filter:
     class Valves:
         def __init__(self):
             self.indexer_url = "http://indexer:8001"
-            self.limit = 6
+            self.limit = 12
             self.default_branch = "prod"
 
     def inlet(self, body: dict, user: dict = None) -> dict:
@@ -65,6 +69,11 @@ class Filter:
                     print(f"[TennisDoc RAG] Comando index detectado: {repo} @ {branch}")
                     return self._trigger_index(body, repo, branch)
 
+            # ── Generar PDF de la última respuesta del asistente ──
+            if _PDF_RE.search(query):
+                repo, branch = self._extract_repo_branch(query)
+                return self._generate_pdf(body, repo, branch)
+
             # ── RAG automático: detectar repo/rama y buscar contexto ──
             repo, branch = self._extract_repo_branch(query)
             print(f"[TennisDoc RAG] Buscando contexto | repo={repo} | branch={branch}")
@@ -94,6 +103,8 @@ class Filter:
                         "Eres un asistente técnico especializado en el código fuente de la organización. "
                         f"Ámbito de búsqueda: {scope}. "
                         "Responde ÚNICAMENTE basándote en el siguiente contexto del código. "
+                        "IMPORTANTE: los fragmentos pueden contener el código Java junto con las queries SQL referenciadas (marcadas como '-- Referenced SQL:'). "
+                        "Busca en TODOS los fragmentos: firmas de métodos, implementaciones, queries SQL/JPQL, lógica de negocio y mapeo de entidades. "
                         "Si la respuesta no está en el contexto, indica que no tienes información suficiente.\n\n"
                         f"{context}"
                     ),
@@ -139,6 +150,46 @@ class Filter:
             print(f"[TennisDoc RAG] ERROR indexando: {e}")
         return body
 
+    def _generate_pdf(self, body: dict, repo: str, branch: str) -> dict:
+        """Genera un PDF de la última respuesta del asistente y la ofrece como descarga."""
+        try:
+            messages = body.get("messages", [])
+            # Buscar la última respuesta del asistente
+            assistant_msg = None
+            for msg in reversed(messages[:-1]):
+                if msg.get("role") == "assistant":
+                    assistant_msg = msg
+                    break
+
+            if not assistant_msg:
+                body["messages"][-1]["content"] = "No hay una respuesta previa del asistente para convertir a PDF."
+                return body
+
+            content = assistant_msg.get("content", "")
+            title = f"Respuesta_{repo.replace('/', '_')}" if repo else "Respuesta"
+
+            resp = requests.post(
+                f"{self.valves.indexer_url}/pdf",
+                json={"title": title, "content": content, "repo": repo, "branch": branch},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            pdf_bytes = resp.content
+            pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+            download_link = f'<a href="data:application/pdf;base64,{pdf_b64}" download="{title}.pdf">📄 Descargar PDF</a>'
+
+            body["messages"][-1]["content"] = (
+                f"He generado el PDF con la respuesta anterior. "
+                f"Haz clic para descargarlo:\n\n{download_link}"
+            )
+            print(f"[TennisDoc RAG] PDF generado: {title}.pdf ({len(pdf_bytes)} bytes)")
+        except Exception as e:
+            body["messages"][-1]["content"] = f"[Sistema] Error generando PDF: {e}"
+            print(f"[TennisDoc RAG] ERROR generando PDF: {e}")
+        return body
+
     def _build_context(self, results: list) -> str:
         """Formatea los chunks recuperados para el prompt."""
         parts = []
@@ -147,7 +198,7 @@ class Filter:
             file_path = r.get("file_path", "unknown")
             repo = r.get("repo", "unknown")
             branch = r.get("branch", "")
-            text = r.get("text", "")[:1200]
+            text = r.get("text", "")[:12000]
             branch_info = f" | Rama: {branch}" if branch else ""
             parts.append(
                 f"[Fragmento {i}] Score: {score:.3f} | Repo: {repo}{branch_info} | Archivo: {file_path}\n```\n{text}\n```"

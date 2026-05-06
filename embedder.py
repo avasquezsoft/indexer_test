@@ -44,7 +44,16 @@ async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
                     log.error(f"Respuesta inesperada de OpenRouter: {data}")
                     raise RuntimeError("La respuesta de embeddings no contiene 'data'")
 
-                return [item["embedding"] for item in data["data"]]
+                embeddings = [item["embedding"] for item in data["data"]]
+                # Validar: no NaN/Inf, dimensión correcta
+                for i, emb in enumerate(embeddings):
+                    if len(emb) != 1536:
+                        log.error(f"Embedding {i} tiene dimensión {len(emb)}, se esperaba 1536")
+                        raise RuntimeError(f"Dimensión de embedding incorrecta: {len(emb)}")
+                    if any(v != v or v == float("inf") or v == float("-inf") for v in emb):
+                        log.error(f"Embedding {i} contiene NaN o Inf")
+                        raise RuntimeError("Embedding contiene valores inválidos (NaN/Inf)")
+                return embeddings
 
         except (httpx.HTTPStatusError, httpx.NetworkError, httpx.TimeoutException) as exc:
             last_error = exc

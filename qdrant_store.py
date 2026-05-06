@@ -111,6 +111,9 @@ def upsert_chunks(client: QdrantClient, collection: str, chunks: list[dict], emb
 
 def search_chunks(client: QdrantClient, collection: str, query_vector: list[float], repo_filter: str | None = None, branch_filter: str | None = None, limit: int = 6) -> list[dict]:
     """Busca los chunks más relevantes para un vector de consulta."""
+    import logging
+    log = logging.getLogger(__name__)
+
     conditions = []
     if repo_filter:
         conditions.append(FieldCondition(key="repo", match=MatchValue(value=repo_filter)))
@@ -119,22 +122,31 @@ def search_chunks(client: QdrantClient, collection: str, query_vector: list[floa
 
     query_filter = Filter(must=conditions) if conditions else None
 
-    results = client.search(
-        collection_name=collection,
-        query_vector=query_vector,
-        query_filter=query_filter,
-        limit=limit,
-        with_payload=True,
-    )
+    try:
+        results = client.search(
+            collection_name=collection,
+            query_vector=query_vector,
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        )
+    except Exception as exc:
+        log.error(f"Error en Qdrant search: {exc}")
+        raise
 
-    return [
-        {
-            "score": r.score,
-            "repo": r.payload["repo"],
-            "branch": r.payload.get("branch", ""),
-            "file_path": r.payload["file_path"],
-            "language": r.payload["language"],
-            "text": r.payload["text"],
-        }
-        for r in results
-    ]
+    output = []
+    for r in results:
+        try:
+            output.append({
+                "score": r.score,
+                "repo": r.payload.get("repo", "unknown"),
+                "branch": r.payload.get("branch", ""),
+                "file_path": r.payload.get("file_path", "unknown"),
+                "language": r.payload.get("language", "unknown"),
+                "text": r.payload.get("text", ""),
+            })
+        except Exception as exc:
+            log.warning(f"Chunk con payload incompleto descartado: {exc}")
+            continue
+
+    return output
