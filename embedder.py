@@ -67,8 +67,13 @@ async def _embed_single_batch(texts: list[str], api_base: str) -> list[list[floa
                     raise RuntimeError("La respuesta de embeddings no contiene 'data'")
 
                 embeddings = [item["embedding"] for item in data["data"]]
-                # Validar: no NaN/Inf, dimensión correcta
+                # Validar: no NaN/Inf, dimensión correcta (truncar si es mayor, modelo Matryoshka)
                 for i, emb in enumerate(embeddings):
+                    if len(emb) > VECTOR_SIZE:
+                        # Modelo Matryoshka (ej: Codestral Embed): dimensiones ordenadas por relevancia
+                        log.debug(f"Embedding {i} tiene {len(emb)} dims, truncando a {VECTOR_SIZE}")
+                        emb = emb[:VECTOR_SIZE]
+                        embeddings[i] = emb
                     if len(emb) != VECTOR_SIZE:
                         log.error(f"Embedding {i} tiene dimensión {len(emb)}, se esperaba {VECTOR_SIZE}")
                         raise RuntimeError(f"Dimensión de embedding incorrecta: {len(emb)}. Verificá que OPENROUTER_EMBED_MODEL y VECTOR_SIZE coincidan.")
