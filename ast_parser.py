@@ -650,12 +650,18 @@ def parse_file_to_chunks_and_entities(source: str, language: str, repo: str, bra
     Devuelve (entidades_de_grafo, chunks_para_embedding).
 
     Cada entidad principal (clase, método, función) genera un chunk.
+    Las clases/interfaces muy grandes se truncan en el chunk visible para no
+    saturar el contexto del LLM (los métodos/fields ya tienen sus propios chunks).
     """
     entities = parse_file(source, language, repo, branch, file_path)
     chunks = []
     for ent in entities:
+        text = ent.code
+        # Truncar clases/interfaces enormes; los métodos/fields individuales cubren el contenido
+        if ent.type in ("Class", "Interface", "Enum") and len(text) > 12000:
+            text = text[:12000] + f"\n... (clase truncada, {len(ent.code)} chars totales) ..."
         chunks.append({
-            "text": ent.code,
+            "text": text,
             "metadata": {
                 "repo": ent.repo,
                 "branch": ent.branch,
@@ -676,6 +682,10 @@ def _make_entity_id(ent: GraphEntity) -> str:
     return f"{ent.repo}:{ent.branch}:{ent.file_path}:{ent.type}:{ent.name}"
 
 
+_MAX_CODE_EMBED_CHARS = 6000
+_MAX_RELATIONS_IN_EMBED = 20
+
+
 def _build_embed_text(ent: GraphEntity) -> str:
     """Texto enriquecido para generar embeddings de código."""
     parts = [
@@ -690,8 +700,13 @@ def _build_embed_text(ent: GraphEntity) -> str:
         parts.append(f"Documentation: {ent.docstring}")
     if ent.annotations:
         parts.append(f"Annotations: {', '.join(ent.annotations)}")
-    for rel in ent.relations:
+    for rel in ent.relations[:_MAX_RELATIONS_IN_EMBED]:
         parts.append(f"{rel.type} {rel.target_type} {rel.target_name}")
+    if len(ent.relations) > _MAX_RELATIONS_IN_EMBED:
+        parts.append(f"... and {len(ent.relations) - _MAX_RELATIONS_IN_EMBED} more relations")
     parts.append("Code:")
-    parts.append(ent.code)
+    code = ent.code
+    if len(code) > _MAX_CODE_EMBED_CHARS:
+        code = code[:_MAX_CODE_EMBED_CHARS] + f"\n... ({len(ent.code)} chars total) ..."
+    parts.append(code)
     return "\n".join(parts)
