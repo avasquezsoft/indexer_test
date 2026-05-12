@@ -8,6 +8,8 @@ log = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 2  # segundos
+_BATCH_SIZE = 50  # máximo de textos por request a OpenRouter
+_MAX_EMBED_CHARS = 30000  # ~7500 tokens para código (estimación conservadora < 8192)
 
 
 async def get_embedding(text: str) -> list[float]:
@@ -16,26 +18,33 @@ async def get_embedding(text: str) -> list[float]:
     return embeddings[0]
 
 
-_BATCH_SIZE = 50  # máximo de textos por request a OpenRouter
-
-
 async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
     """Genera embeddings para una lista de textos vía OpenRouter con reintentos.
 
-    Divide automáticamente en sub-batches para evitar 'Too many tokens'.
+    Divide automáticamente en sub-batches para evitar 'Too many tokens',
+    y trunca textos individuales que excedan el límite de tokens del modelo.
     """
     api_base = OPENROUTER_API_BASE.rstrip("/")
 
     if not texts:
         return []
 
+    # Truncar textos excesivamente largos para que ninguno exceda el max de tokens
+    truncated_texts = []
+    for i, t in enumerate(texts):
+        if len(t) > _MAX_EMBED_CHARS:
+            log.warning("Texto %s excede %s chars (%s), truncando para embedding", i, _MAX_EMBED_CHARS, len(t))
+            truncated_texts.append(t[:_MAX_EMBED_CHARS])
+        else:
+            truncated_texts.append(t)
+
     all_embeddings: list[list[float]] = []
 
-    for batch_start in range(0, len(texts), _BATCH_SIZE):
-        batch = texts[batch_start : batch_start + _BATCH_SIZE]
+    for batch_start in range(0, len(truncated_texts), _BATCH_SIZE):
+        batch = truncated_texts[batch_start : batch_start + _BATCH_SIZE]
         batch_embeddings = await _embed_single_batch(batch, api_base)
         all_embeddings.extend(batch_embeddings)
-        log.info("Embedding batch %s-%s/%s OK", batch_start + 1, batch_start + len(batch), len(texts))
+        log.info("Embedding batch %s-%s/%s OK", batch_start + 1, batch_start + len(batch), len(truncated_texts))
 
     return all_embeddings
 

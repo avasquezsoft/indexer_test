@@ -43,7 +43,7 @@ class Relation(BaseModel):
 
 
 class GraphEntity(BaseModel):
-    type: Literal["Class", "Interface", "Method", "Field", "Annotation", "Function", "Struct"]
+    type: Literal["Class", "Interface", "Method", "Field", "Annotation", "Function", "Struct", "Enum"]
     name: str
     file_path: str
     repo: str
@@ -302,14 +302,16 @@ def _extract_java_treesitter(source: str, tree, repo: str, branch: str, file_pat
     root = tree.root_node
 
     def walk(node, parent_name: str = ""):
-        if node.type in ("class_declaration", "interface_declaration"):
+        if node.type in ("class_declaration", "interface_declaration", "enum_declaration"):
             is_interface = node.type == "interface_declaration"
+            is_enum = node.type == "enum_declaration"
             name_node = _child_by_type(node, "identifier")
             name = _node_text(source, name_node) if name_node else ""
             body = _child_by_type(node, "class_body") or _child_by_type(node, "interface_body")
             sig = _node_text(source, node).split("{")[0].strip()
+            ent_type = "Interface" if is_interface else ("Enum" if is_enum else "Class")
             cls_ent = GraphEntity(
-                type="Interface" if is_interface else "Class",
+                type=ent_type,
                 name=name,
                 file_path=file_path,
                 repo=repo,
@@ -376,6 +378,25 @@ def _extract_java_treesitter(source: str, tree, repo: str, branch: str, file_pat
                         cls_ent.relations.append(Relation(
                             type="HAS_METHOD", target_name=mname, target_type="Method"
                         ))
+                    elif child.type == "enum_constant":
+                        for decl in _children_by_type(child, "enum_constant"):
+                            fname_node = _child_by_type(decl, "identifier")
+                            fname = _node_text(source, fname_node) if fname_node else ""
+                            fent = GraphEntity(
+                                type="Field",
+                                name=fname,
+                                file_path=file_path,
+                                repo=repo,
+                                branch=branch,
+                                language="java",
+                                start_line=child.start_point[0] + 1,
+                                end_line=child.end_point[0] + 1,
+                                code=_node_text(source, child),
+                            )
+                            entities.append(fent)
+                            cls_ent.relations.append(Relation(
+                                type="HAS_FIELD", target_name=fname, target_type="Field"
+                            ))
                     elif child.type == "field_declaration":
                         for decl in _children_by_type(child, "variable_declarator"):
                             fname_node = _child_by_type(decl, "identifier")
