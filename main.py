@@ -405,7 +405,7 @@ class SearchAugmentedRequest(BaseModel):
     query: str
     repo: str | None = None
     branch: str | None = None
-    max_files: int = 5       # cuántos archivos completos traer
+    max_files: int = 10      # cuántos archivos completos traer
     vector_limit: int = 50   # cuántos chunks vectoriales usar para identificar archivos
 
 

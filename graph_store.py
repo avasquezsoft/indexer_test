@@ -211,11 +211,14 @@ def get_related_entities(entity_id: str, depth: int = 2) -> list[dict]:
     Navega el grafo desde una entidad hacia sus vecinos.
     Devuelve lista de dicts con metadata de cada entidad relacionada.
     """
+    # Neo4j no acepta parámetros en rangos de patrones MATCH (*1..$depth).
+    # Como depth es un entero pequeño controlado internamente, usamos f-string seguro.
+    safe_depth = max(1, min(int(depth), 5))
     driver = get_driver()
     with driver.session() as session:
         result = session.run(
-            """
-            MATCH path = (start:CodeEntity {id: $entity_id})-[:EXTENDS|IMPLEMENTS|HAS_METHOD|HAS_FIELD|CALLS|INJECTED*1..$depth]-(related:CodeEntity)
+            f"""
+            MATCH path = (start:CodeEntity {{id: $entity_id}})-[:EXTENDS|IMPLEMENTS|HAS_METHOD|HAS_FIELD|CALLS|INJECTED*1..{safe_depth}]-(related:CodeEntity)
             RETURN DISTINCT related.id AS id,
                    related.name AS name,
                    related.type AS type,
@@ -225,7 +228,7 @@ def get_related_entities(entity_id: str, depth: int = 2) -> list[dict]:
                    length(path) AS distance
             ORDER BY distance, related.name
             """,
-            entity_id=entity_id, depth=depth,
+            entity_id=entity_id,
         )
         return [dict(record) for record in result]
 

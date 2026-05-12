@@ -46,7 +46,7 @@ class CodeGraphRetriever:
         self,
         repo: str | None = None,
         branch: str | None = None,
-        vector_limit: int = 30,
+        vector_limit: int = 50,
         graph_depth: int = 2,
         name_search_limit: int = 5,
     ):
