@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arquitectura — Tennis Doc IA</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.0/mermaid.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --surface-light: #334155;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-2: #a78bfa;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --danger: #f87171;
+            --border: #334155;
+            --font: 'Space Grotesk', system-ui, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            line-height: 1.6;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--surface) 0%, #0f172a 100%);
+            border-bottom: 1px solid var(--border);
+            padding: 3rem 1.5rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        header::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(ellipse at 50% 0%, rgba(56,189,248,0.12) 0%, transparent 65%);
+            pointer-events: none;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, var(--accent), var(--accent-2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+            position: relative;
+        }
+
+        header p {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+            max-width: 600px;
+            margin: 0 auto;
+            position: relative;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        section {
+            margin-bottom: 3.5rem;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        h2::before {
+            content: '';
+            display: block;
+            width: 4px;
+            height: 1.5rem;
+            background: linear-gradient(180deg, var(--accent), var(--accent-2));
+            border-radius: 2px;
+        }
+
+        h3 {
+            font-size: 1.1rem;
+            color: var(--accent);
+            margin: 1.75rem 0 0.75rem;
+            font-weight: 600;
+        }
+
+        p { margin-bottom: 1rem; color: var(--text-muted); }
+
+        /* ── Mermaid diagram wrapper ── */
+        .diagram-wrap {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 2rem 1.5rem;
+            overflow-x: auto;
+        }
+
+        .diagram-wrap .mermaid {
+            display: flex;
+            justify-content: center;
+        }
+
+        /* Mermaid theme overrides injected via init */
+        .mermaid svg {
+            max-width: 100%;
+            height: auto;
+        }
+
+        /* ── Flow phase tabs ── */
+        .phase-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .phase-tab {
+            padding: 0.4rem 1rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .phase-tab.active-index {
+            background: rgba(56,189,248,0.15);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .phase-tab.active-query {
+            background: rgba(167,139,250,0.15);
+            border-color: var(--accent-2);
+            color: var(--accent-2);
+        }
+
+        .phase-tab:not(.active-index):not(.active-query) {
+            background: var(--surface-light);
+            color: var(--text-muted);
+        }
+
+        .phase-tab:hover:not(.active-index):not(.active-query) {
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        /* ── Steps list ── */
+        .flow {
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+        }
+
+        .flow-step {
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 0.9rem 1rem;
+            transition: border-color 0.2s, transform 0.2s;
+        }
+
+        .flow-step:hover {
+            border-color: var(--accent);
+            transform: translateX(3px);
+        }
+
+        .flow-step.phase-query:hover {
+            border-color: var(--accent-2);
+        }
+
+        .flow-step .num {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: var(--accent);
+            color: var(--bg);
+            font-weight: 700;
+            font-size: 0.82rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .flow-step.phase-query .num { background: var(--accent-2); }
+
+        .flow-step p { margin: 0; font-size: 0.9rem; }
+
+        /* ── Grid / cards ── */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent);
+        }
+
+        .card h4 {
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+            color: var(--accent);
+        }
+
+        .card p { font-size: 0.9rem; margin: 0; }
+
+        /* ── Badges ── */
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .badge-green  { background: rgba(74,222,128,0.15); color: var(--success); }
+        .badge-blue   { background: rgba(56,189,248,0.15); color: var(--accent); }
+        .badge-purple { background: rgba(167,139,250,0.15); color: var(--accent-2); }
+        .badge-orange { background: rgba(251,191,36,0.15);  color: var(--warning); }
+
+        /* ── Tables ── */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--surface);
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        th, td {
+            padding: 0.85rem 1rem;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: var(--surface-light);
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+
+        td code {
+            background: rgba(15,23,42,0.6);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+            font-size: 0.83em;
+            color: var(--accent);
+        }
+
+        /* ── Code block ── */
+        .code-block {
+            background: #0b1120;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1.25rem;
+            overflow-x: auto;
+        }
+
+        .code-block pre {
+            font-family: var(--font-mono);
+            font-size: 0.84rem;
+            line-height: 1.65;
+            color: var(--text);
+        }
+
+        /* ── Highlight box ── */
+        .highlight-box {
+            background: rgba(56,189,248,0.07);
+            border-left: 3px solid var(--accent);
+            padding: 0.9rem 1.2rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1rem 0;
+        }
+
+        .highlight-box p { margin: 0; color: var(--text); font-size: 0.9rem; }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            border-top: 1px solid var(--border);
+        }
+
+        @media (max-width: 640px) {
+            header h1 { font-size: 1.75rem; }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Tennis Doc IA</h1>
+    <p>Arquitectura técnica del indexador de documentación con inteligencia artificial para repositorios GitHub.</p>
+</header>
+
+<main class="container">
+
+    <!-- ══════════════════════════════════════
+         DIAGRAMA DE ARQUITECTURA — Mermaid
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Diagrama de arquitectura</h2>
+        <div class="diagram-wrap">
+            <div class="mermaid">
+flowchart TD
+    GH["🐙 GitHub\n(organización)"]:::ext
+    IDX["⚡ Indexador\nPython · FastAPI"]:::core
+    OR1["🤖 OpenRouter API\ncodestral-embed-2505\n1024 dims"]:::ext
+    JP["☕ JavaParser\nJavalin · AST"]:::svc
+    NEO["🕸️ Neo4j\nGraph DB"]:::db
+    QDR["🔷 Qdrant\nVector DB"]:::db
+    LLM["🔀 LiteLLM\nAPI Gateway"]:::core
+    OR2["🤖 OpenRouter API\nkimi-k2.6 · gpt-4o-mini"]:::ext
+    OWU["💬 Open WebUI\nChat Interface"]:::ui
+    PG["🐘 Postgres\nLiteLLM metadata"]:::db
+
+    GH -- "webhook push" --> IDX
+    IDX -- "embeddings" --> OR1
+    IDX -- "parse Java/Spring" --> JP
+    IDX -- "grafo entidades\nEXTENDS · CALLS · INJECTED" --> NEO
+    IDX -- "vectores + metadata\nbatch 100 puntos" --> QDR
+    QDR -- "LlamaIndex\nvector + grafo + keyword" --> LLM
+    NEO -- "navegación grafo" --> LLM
+    LLM -- "chat completion" --> OR2
+    LLM -- "logs · métricas" --> PG
+    LLM -- "respuesta generada" --> OWU
+
+    classDef ext  fill:#1e3a5f,stroke:#38bdf8,color:#e0f2fe,rx:8
+    classDef core fill:#1e293b,stroke:#38bdf8,color:#f1f5f9,rx:8
+    classDef db   fill:#14532d,stroke:#4ade80,color:#dcfce7,rx:8
+    classDef svc  fill:#3b1f69,stroke:#a78bfa,color:#ede9fe,rx:8
+    classDef ui   fill:#1e293b,stroke:#a78bfa,color:#f1f5f9,rx:8
+            </div>
+        </div>
+
+        <p style="margin-top:1rem; font-size:0.82rem; color:var(--text-muted); text-align:center;">
+            <span style="color:var(--accent)">●</span> Servicios core &nbsp;
+            <span style="color:#4ade80">●</span> Bases de datos &nbsp;
+            <span style="color:var(--accent-2)">●</span> Servicios auxiliares &nbsp;
+            <span style="color:#7dd3fc">●</span> APIs externas
+        </p>
+    </section>
+
+    <!-- ══════════════════════════════════════
+         SERVICIOS DEL STACK
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Servicios del stack</h2>
+        <div class="grid-2">
+            <div class="card">
+                <h4>Open WebUI <span class="badge badge-green">Frontend</span></h4>
+                <p>Interfaz de chat web donde el equipo hace preguntas en lenguaje natural. Se conecta a LiteLLM mediante API compatible con OpenAI.</p>
+            </div>
+            <div class="card">
+                <h4>LiteLLM <span class="badge badge-blue">Gateway</span></h4>
+                <p>Router de modelos IA. Expone una API unificada y enruta las peticiones de chat hacia OpenRouter. Gestiona modelos, keys y logs en Postgres.</p>
+            </div>
+            <div class="card">
+                <h4>Qdrant <span class="badge badge-purple">Vector DB</span></h4>
+                <p>Base de datos vectorial self-hosted. Almacena embeddings de código (1024 dims, distancia coseno) con metadata enriquecida: repo, rama, lenguaje, entidad AST.</p>
+            </div>
+            <div class="card">
+                <h4>Neo4j <span class="badge badge-purple">Graph DB</span></h4>
+                <p>Base de datos de grafo (Community 5.26 + APOC). Nodos <code>CodeEntity</code> y relaciones: EXTENDS, IMPLEMENTS, HAS_METHOD, HAS_FIELD, CALLS, INJECTED, ANNOTATED_WITH.</p>
+            </div>
+            <div class="card">
+                <h4>JavaParser <span class="badge badge-orange">Parser</span></h4>
+                <p>Microservicio Javalin que parsea código Java/Spring Boot con JavaParser 3.26. Extrae anotaciones, herencia, interfaces, campos inyectados y llamadas a métodos. Fallback a Tree-sitter.</p>
+            </div>
+            <div class="card">
+                <h4>Indexador <span class="badge badge-orange">Backend</span></h4>
+                <p>Servicio FastAPI en <code>http://indexer:8001</code>. Escucha webhooks de GitHub, clona repos, parsea AST, construye grafo Neo4j y genera embeddings vía OpenRouter.</p>
+            </div>
+            <div class="card">
+                <h4>Postgres <span class="badge badge-green">Database</span></h4>
+                <p>Base relacional que persiste configuración, logs y métricas de LiteLLM.</p>
+            </div>
+            <div class="card">
+                <h4>OpenRouter <span class="badge badge-blue">Proveedor IA</span></h4>
+                <p>API externa que provee embeddings (<code>codestral-embed-2505</code>, 1024 dims) y modelos de chat (<code>kimi-k2.6</code> principal, <code>gpt-4o-mini</code> fallback).</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ══════════════════════════════════════
+         FLUJO DE DATOS — dos diagramas Mermaid
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Flujo de datos</h2>
+
+        <h3>🔵 Fase 1 — Indexación</h3>
+        <div class="diagram-wrap" style="margin-bottom:1.5rem;">
+            <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant GH as 🐙 GitHub
+    participant IDX as ⚡ Indexador
+    participant JP as ☕ JavaParser
+    participant NEO as 🕸️ Neo4j
+    participant OR as 🤖 OpenRouter
+    participant QDR as 🔷 Qdrant
+
+    GH->>IDX: webhook push
+    IDX->>GH: JWT + token instalación
+    GH-->>IDX: árbol de archivos
+    IDX->>JP: código Java/Spring Boot
+    JP-->>IDX: AST (clases, métodos, anotaciones)
+    IDX->>NEO: upsert CodeEntity + relaciones
+    IDX->>OR: chunks → codestral-embed-2505
+    OR-->>IDX: vectores 1024 dims
+    IDX->>QDR: batch upsert (100 puntos + metadata)
+            </div>
+        </div>
+
+        <h3>🟣 Fase 2 — Consulta RAG</h3>
+        <div class="diagram-wrap">
+            <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant USR as 👤 Usuario
+    participant OWU as 💬 Open WebUI
+    participant RAG as 🧩 Tennis Doc RAG
+    participant IDX as ⚡ /search-graph
+    participant QDR as 🔷 Qdrant
+    participant NEO as 🕸️ Neo4j
+    participant LLM as 🔀 LiteLLM
+    participant OR as 🤖 OpenRouter
+
+    USR->>OWU: pregunta en lenguaje natural
+    OWU->>RAG: intercepta (Filter)
+    RAG->>RAG: enriquece query con keywords técnicas
+    RAG->>IDX: POST /search-graph
+    IDX->>QDR: búsqueda vectorial
+    IDX->>NEO: navegación grafo
+    QDR-->>IDX: chunks + metadata AST
+    NEO-->>IDX: relaciones y dependencias
+    IDX-->>RAG: contexto enriquecido
+    RAG->>LLM: system context + pregunta
+    LLM->>OR: kimi-k2.6 (fallback gpt-4o-mini)
+    OR-->>LLM: respuesta generada
+    LLM-->>OWU: markdown estructurado
+    OWU-->>USR: respuesta con jerarquía y código
+            </div>
+        </div>
+    </section>
+
+    <!-- ══════════════════════════════════════
+         RAG FILTER FLOW — Mermaid flowchart
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Integración RAG con Open WebUI</h2>
+        <p>La función <code>tennis_doc_rag.py</code> actúa como un <strong>Filter</strong> dentro de Open WebUI. Intercepta cada conversación antes de enviarla al LLM:</p>
+
+        <div class="diagram-wrap">
+            <div class="mermaid">
+flowchart LR
+    Q["💬 Pregunta\ndel usuario"]:::ui
+    EQ{"¿Busca\ncódigo?"}:::decision
+    ENR["🔍 Enriquecer\ncon keywords"]:::proc
+    SG["⚡ POST\n/search-graph"]:::proc
+    VEC["🔷 Qdrant\nvectorial"]:::db
+    GRA["🕸️ Neo4j\ngrafo"]:::db
+    CTX["📦 Contexto\nenriquecido"]:::proc
+    SYS["📝 system\nprompt"]:::proc
+    LLM["🔀 LiteLLM\n→ OpenRouter"]:::core
+    ANS["✅ Respuesta\nestructurada"]:::ui
+
+    Q --> EQ
+    EQ -- Sí --> ENR --> SG
+    EQ -- No --> SG
+    SG --> VEC & GRA --> CTX --> SYS --> LLM --> ANS
+
+    classDef ui       fill:#1e293b,stroke:#a78bfa,color:#f1f5f9
+    classDef decision fill:#1e3a5f,stroke:#38bdf8,color:#e0f2fe
+    classDef proc     fill:#1e293b,stroke:#38bdf8,color:#f1f5f9
+    classDef db       fill:#14532d,stroke:#4ade80,color:#dcfce7
+    classDef core     fill:#1e293b,stroke:#fbbf24,color:#fef9c3
+            </div>
+        </div>
+
+        <div class="highlight-box">
+            <p><strong>Comando especial:</strong> escribe <code>indexa TennisDev/mi-repo</code> o <code>indexa TennisDev/mi-repo develop</code> en el chat y la función disparará <code>POST /index</code> automáticamente, sin necesidad de entrar al contenedor.</p>
+        </div>
+        <div class="highlight-box">
+            <p><strong>Ver grafo de una clase:</strong> escribe <code>grafo NombreClase</code> en el chat y la función consultará Neo4j para mostrar sus relaciones directas (herencia, implementaciones, métodos, campos, inyecciones).</p>
+        </div>
+        <div class="highlight-box">
+            <p><strong>Exportar a Markdown:</strong> escribe <code>generame un md con toda la info del módulo X</code> y la función armará un archivo <code>.md</code> estructurado con todos los chunks recuperados, listo para descargar.</p>
+        </div>
+
+        <h3>Activación en Dokploy / Docker Compose</h3>
+        <p>La función ya viene <strong>embebida dentro del <code>docker-compose.yml</code></strong> como un <code>config</code> inline. Open WebUI la recibe automáticamente al iniciar. Solo debes ir a <em>Admin Panel → Functions</em>, buscar <strong>Tennis Doc RAG</strong> y activar el toggle.</p>
+        <p>Haz clic en <strong>⚙️ Config</strong> de la función para cambiar la rama por defecto (<code>prod</code>) o ajustar la cantidad de chunks.</p>
+        <p><strong>Importante:</strong> el archivo <code>tennis_doc_rag.py</code> en el repo y la versión embebida en <code>docker-compose.yml</code> deben mantenerse sincronizados.</p>
+    </section>
+
+    <!-- ══════════════════════════════════════
+         ESTRUCTURA DEL PROYECTO
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Estructura del proyecto</h2>
+        <div class="code-block">
+<pre>
+tennis-doc/
+├── docker-compose.yml          # Orquestación de los 7 servicios
+├── .env                        # Variables de entorno (NO subir a Git)
+├── .env.example                # Plantilla documentada
+├── .gitignore                  # Excluye secretos y caché
+├── AGENTS.md                   # Referencia técnica para agentes
+└── README.md                   # Documentación de usuario
+
+indexer/
+├── main.py                     # FastAPI: endpoints y orquestación
+├── config.py                   # Variables de entorno centralizadas
+├── github_client.py            # Auth JWT + API REST de GitHub (httpx)
+├── ast_parser.py               # Parser AST con Tree-sitter + JavaParser client
+├── chunker.py                  # División semántica de archivos (fallback)
+├── embedder.py                 # Embeddings vía OpenRouter (con retries)
+├── graph_store.py              # Cliente Neo4j: schema, upsert, búsqueda
+├── qdrant_store.py             # Cliente Qdrant (crear, upsert, buscar)
+├── rag_engine.py               # Motor RAG híbrido con LlamaIndex
+├── tennis_doc_rag.py           # Filter de Open WebUI (sincronizar con compose)
+├── requirements.txt            # Dependencias Python
+└── javaparser-service/         # Microservicio Java con JavaParser
+    ├── Dockerfile
+    ├── pom.xml
+    └── src/main/java/...</pre>
+        </div>
+    </section>
+
+    <!-- ══════════════════════════════════════
+         ENDPOINTS
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Endpoints del indexador</h2>
+        <table>
+            <thead>
+                <tr><th>Método</th><th>Endpoint</th><th>Descripción</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>POST</code></td><td><code>/index</code></td><td>Dispara indexación manual. Body: <code>{"repo": "org/repo", "branch?": "main"}</code></td></tr>
+                <tr><td><code>POST</code></td><td><code>/webhook</code></td><td>Recibe eventos <code>push</code> de GitHub. Valida firma HMAC-SHA256.</td></tr>
+                <tr><td><code>POST</code></td><td><code>/search</code></td><td>Búsqueda semántica directa (legacy).</td></tr>
+                <tr><td><code>POST</code></td><td><code>/search-augmented</code></td><td>Búsqueda híbrida archivo-completo (legacy).</td></tr>
+                <tr><td><code>POST</code></td><td><code>/search-graph</code></td><td><strong>Búsqueda híbrida principal</strong>: vector + grafo + keyword vía LlamaIndex.</td></tr>
+                <tr><td><code>GET</code></td><td><code>/graph/entity/{name}</code></td><td>Busca una entidad por nombre y devuelve sus relaciones directas.</td></tr>
+                <tr><td><code>GET</code></td><td><code>/graph/related/{entity_id}</code></td><td>Navega vecinos en el grafo desde una entidad.</td></tr>
+                <tr><td><code>POST</code></td><td><code>/fetch-file</code></td><td>Trae el contenido crudo de un archivo específico desde GitHub.</td></tr>
+                <tr><td><code>POST</code></td><td><code>/pdf</code></td><td>Genera PDF descargable a partir de markdown/texto.</td></tr>
+                <tr><td><code>POST</code></td><td><code>/markdown</code></td><td>Genera archivo <code>.md</code> descargable a partir de contenido markdown.</td></tr>
+                <tr><td><code>GET</code></td><td><code>/debug/files</code></td><td>Lista archivos disponibles en GitHub para indexar.</td></tr>
+                <tr><td><code>GET</code></td><td><code>/debug/files-indexed</code></td><td>Lista archivos únicos ya almacenados en Qdrant.</td></tr>
+                <tr><td><code>GET</code></td><td><code>/debug/chunks</code></td><td>Muestra chunks de un archivo específico en Qdrant.</td></tr>
+                <tr><td><code>GET</code></td><td><code>/health</code></td><td>Health check real: verifica Qdrant + Neo4j + JavaParser.</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- ══════════════════════════════════════
+         VARIABLES DE ENTORNO
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Variables de entorno clave</h2>
+        <table>
+            <thead>
+                <tr><th>Servicio</th><th>Variable</th><th>Descripción</th></tr>
+            </thead>
+            <tbody>
+                <tr><td rowspan="3">OpenRouter</td><td><code>OPENROUTER_API_BASE</code></td><td>URL base (<code>https://openrouter.ai/api/v1</code>)</td></tr>
+                <tr><td><code>OPENROUTER_API_KEY</code></td><td>API key de OpenRouter</td></tr>
+                <tr><td><code>OPENROUTER_EMBED_MODEL</code></td><td>Modelo de embeddings (<code>mistralai/codestral-embed-2505</code>, 1024 dims)</td></tr>
+                <tr><td rowspan="2">LiteLLM</td><td><code>LITELLM_MASTER_KEY</code></td><td>Clave maestra interna entre servicios</td></tr>
+                <tr><td><code>DATABASE_URL</code></td><td>Conexión Postgres (<code>postgresql://...</code>)</td></tr>
+                <tr><td rowspan="2">Qdrant</td><td><code>QDRANT_API_KEY</code></td><td>Clave de acceso a Qdrant</td></tr>
+                <tr><td><code>QDRANT_COLLECTION</code></td><td>Nombre de la colección (<code>code_chunks</code>)</td></tr>
+                <tr><td rowspan="3">Neo4j</td><td><code>NEO4J_URL</code></td><td>URL Bolt (<code>bolt://neo4j:7687</code>)</td></tr>
+                <tr><td><code>NEO4J_USER</code></td><td>Usuario (<code>neo4j</code>)</td></tr>
+                <tr><td><code>NEO4J_PASSWORD</code></td><td>Contraseña (mismo valor que en <code>NEO4J_AUTH</code>)</td></tr>
+                <tr><td>JavaParser</td><td><code>JAVAPARSER_URL</code></td><td>URL interna del microservicio (<code>http://javaparser:8080</code>)</td></tr>
+                <tr><td rowspan="2">GitHub App</td><td><code>GITHUB_APP_ID</code></td><td>ID numérico de la GitHub App</td></tr>
+                <tr><td><code>GITHUB_APP_PRIVATE_KEY</code></td><td>Contenido del <code>.pem</code> en una sola línea</td></tr>
+                <tr><td>Seguridad</td><td><code>WEBHOOK_SECRET</code></td><td>Secreto para validar webhooks de GitHub</td></tr>
+            </tbody>
+        </table>
+        <div class="highlight-box">
+            <p><strong>Tip de seguridad:</strong> todas las claves deben generarse con <code>openssl rand -hex 32</code> y rotarse periódicamente. El archivo <code>.env</code> nunca debe subirse a Git gracias a <code>.gitignore</code>.</p>
+        </div>
+    </section>
+
+    <!-- ══════════════════════════════════════
+         MEJORAS RECIENTES
+    ══════════════════════════════════════ -->
+    <section>
+        <h2>Mejoras recientes</h2>
+        <div class="grid-2">
+            <div class="card"><h4>🧠 Arquitectura v2.0: AST + Grafo + LlamaIndex</h4><p>Se migró de chunking textual básico a parseo AST profesional. Tree-sitter y JavaParser extraen clases, métodos, campos y relaciones. Neo4j almacena el grafo de dependencias. LlamaIndex orquesta retrieval híbrido.</p></div>
+            <div class="card"><h4>🕸️ Grafo de dependencias</h4><p>Neo4j indexa relaciones tipadas: EXTENDS, IMPLEMENTS, HAS_METHOD, HAS_FIELD, CALLS, INJECTED, ANNOTATED_WITH. El endpoint <code>/graph/entity/{name}</code> permite consultar jerarquías directamente.</p></div>
+            <div class="card"><h4>🔍 Búsqueda híbrida /search-graph</h4><p>Combina búsqueda vectorial en Qdrant, navegación de grafo en Neo4j y keyword search por nombres de clase (CamelCase). Devuelve contexto mucho más completo que la búsqueda puramente vectorial.</p></div>
+            <div class="card"><h4>🧠 Query enrichment</h4><p>El RAG detecta preguntas sobre módulos y enriquece automáticamente la query con keywords técnicas para recuperar DAOs e implementaciones.</p></div>
+            <div class="card"><h4>📎 SQL Inline Resolver</h4><p>Cuando un <code>.java</code> referencia un <code>.sql</code>, el contenido de la query se incrusta en el chunk Java como <code>-- Referenced SQL:</code>.</p></div>
+            <div class="card"><h4>📄 Exportar a Markdown</h4><p>Endpoint <code>POST /markdown</code> y comando en el chat para generar archivos <code>.md</code> descargables con el contexto completo.</p></div>
+            <div class="card"><h4>🔑 Auto-renew GitHub token</h4><p>Durante indexaciones largas, el token de instalación se renueva automáticamente al detectar <code>401 Unauthorized</code>.</p></div>
+            <div class="card"><h4>🔄 Reintentos automáticos</h4><p>El embedder reintenta hasta 3 veces con backoff exponencial ante fallos de red o rate-limits de OpenRouter.</p></div>
+            <div class="card"><h4>🏥 Health check real</h4><p><code>GET /health</code> verifica conectividad con Qdrant, Neo4j y JavaParser antes de reportar estado saludable.</p></div>
+            <div class="card"><h4>🔍 Endpoints de diagnóstico</h4><p><code>/debug/files-indexed</code>, <code>/debug/chunks</code>, <code>/graph/entity/{name}</code> y <code>/graph/related/{entity_id}</code> permiten inspeccionar índices y grafo.</p></div>
+            <div class="card"><h4>⚙️ Configuración centralizada</h4><p>Módulo <code>config.py</code> centraliza variables de entorno; <code>docker-compose.yml</code> usa named volumes para persistencia.</p></div>
+        </div>
+    </section>
+
+</main>
+
+<footer>
+    <p>Tritech Prime · Tennis Doc IA · 2025</p>
+</footer>
+
+<script>
+    mermaid.initialize({
+        startOnLoad: true,
+        theme: 'base',
+        themeVariables: {
+            // Base colors
+            primaryColor: '#1e293b',
+            primaryTextColor: '#f1f5f9',
+            primaryBorderColor: '#38bdf8',
+            lineColor: '#38bdf8',
+            secondaryColor: '#14532d',
+            tertiaryColor: '#3b1f69',
+            background: '#0f172a',
+            mainBkg: '#1e293b',
+            nodeBorder: '#38bdf8',
+            clusterBkg: '#1e293b',
+            titleColor: '#f1f5f9',
+            edgeLabelBackground: '#1e293b',
+            // Sequence diagram
+            actorBkg: '#1e293b',
+            actorBorder: '#38bdf8',
+            actorTextColor: '#f1f5f9',
+            actorLineColor: '#334155',
+            signalColor: '#38bdf8',
+            signalTextColor: '#f1f5f9',
+            labelBoxBkgColor: '#1e293b',
+            labelBoxBorderColor: '#334155',
+            labelTextColor: '#f1f5f9',
+            loopTextColor: '#94a3b8',
+            noteBorderColor: '#334155',
+            noteBkgColor: '#1e293b',
+            noteTextColor: '#f1f5f9',
+            activationBorderColor: '#a78bfa',
+            activationBkgColor: '#3b1f69',
+            sequenceNumberColor: '#0f172a',
+            // Flowchart
+            fillType0: '#1e293b',
+            fillType1: '#1e3a5f',
+            fillType2: '#14532d',
+            fillType3: '#3b1f69',
+        },
+        flowchart: {
+            curve: 'basis',
+            padding: 20,
+            nodeSpacing: 50,
+            rankSpacing: 60,
+        },
+        sequence: {
+            diagramMarginX: 20,
+            diagramMarginY: 10,
+            actorMargin: 60,
+            width: 150,
+            height: 65,
+            boxMargin: 10,
+            useMaxWidth: true,
+        },
+        fontFamily: "'Space Grotesk', system-ui, sans-serif",
+        fontSize: 14,
+    });
+</script>
+
+</body>
+</html>
