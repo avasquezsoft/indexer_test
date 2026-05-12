@@ -12,12 +12,19 @@ import httpx
 from pydantic import BaseModel, Field
 
 # ── Tree-sitter ──
-from tree_sitter import Parser
+from tree_sitter import Language, Parser
 from tree_sitter_go import language as go_lang
 from tree_sitter_java import language as java_lang
 from tree_sitter_javascript import language as js_lang
 from tree_sitter_python import language as py_lang
-from tree_sitter_typescript import language as ts_lang
+from tree_sitter_typescript import language_typescript
+
+# Compatibilidad con tree-sitter 0.24+ (nueva API Language/Parser)
+_ts_lang = Language(language_typescript())
+_go_lang = Language(go_lang())
+_java_lang = Language(java_lang())
+_js_lang = Language(js_lang())
+_py_lang = Language(py_lang())
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +63,11 @@ class GraphEntity(BaseModel):
 # ═══════════════════════════════════════════════════════════════
 
 _LANGUAGE_MAP = {
-    "java": java_lang,
-    "python": py_lang,
-    "javascript": js_lang,
-    "typescript": ts_lang,
-    "go": go_lang,
+    "java": _java_lang,
+    "python": _py_lang,
+    "javascript": _js_lang,
+    "typescript": _ts_lang,
+    "go": _go_lang,
 }
 
 _PARSERS: dict[str, Parser] = {}
@@ -71,8 +78,7 @@ def _get_parser(language: str) -> Parser | None:
         lang_obj = _LANGUAGE_MAP.get(language)
         if lang_obj is None:
             return None
-        parser = Parser()
-        parser.set_language(lang_obj)
+        parser = Parser(lang_obj)
         _PARSERS[language] = parser
     return _PARSERS[language]
 
