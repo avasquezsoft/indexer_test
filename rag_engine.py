@@ -92,7 +92,7 @@ class CodeGraphRetriever:
             logger.warning("Error en búsqueda vectorial: %s", exc)
 
         # ── 2. Expansión por grafo ──
-        entity_ids = [n.metadata["entity_id"] for n in nodes.values() if n.metadata.get("entity_id")]
+        entity_ids = [n.node.metadata["entity_id"] for n in nodes.values() if n.node.metadata.get("entity_id")]
         for eid in set(entity_ids):
             try:
                 related = graph_store.get_related_entities(eid, depth=self.graph_depth)
