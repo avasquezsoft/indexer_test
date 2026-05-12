@@ -873,6 +873,20 @@ async def debug_chunks(repo: str, file_path: str, branch: str = "HEAD"):
 # Health check (con verificación de Qdrant)
 # ─────────────────────────────────────────
 
+@app.get("/repos", dependencies=[Depends(verify_api_key)])
+async def list_repos():
+    """Devuelve la lista de repos únicos indexados en Neo4j."""
+    try:
+        driver = graph_store.get_driver()
+        with driver.session() as session:
+            result = session.run("MATCH (e:CodeEntity) RETURN DISTINCT e.repo AS repo ORDER BY repo")
+            repos = [record["repo"] for record in result if record["repo"]]
+        return {"repos": repos}
+    except Exception as exc:
+        log.error(f"Error listando repos: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/health")
 async def health():
     client = get_client()

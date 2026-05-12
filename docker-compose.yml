@@ -158,9 +158,14 @@ configs:
       # Regex para detectar solicitud de PDF
       _PDF_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?pdf", re.IGNORECASE)
       # Regex para detectar solicitud de Markdown / archivo MD
-      _MD_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?(?:archivo\s+)?(?:markdown|md|\.md)", re.IGNORECASE)
+      _MD_RE = re.compile(
+          r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?|guarda?r?|sacar|dame|mostra?r?)\s+(?:un\s+)?(?:archivo\s+)?(?:markdown|md|\.md)",
+          re.IGNORECASE,
+      )
       # Regex para comando especial "grafo NombreClase"
       _GRAPH_RE = re.compile(r"^\s*grafo\s+([A-Z][a-zA-Z0-9]*)\s*$", re.IGNORECASE)
+      # Regex para listar repositorios indexados
+      _REPOS_LIST_RE = re.compile(r"^\s*(repos|repositorios|listar\s+repos?)\s*$", re.IGNORECASE)
       # Palabras que indican que el usuario busca implementación/código
       _IMPL_KEYWORDS = re.compile(
           r"\b(m[oó]dulo|module|implementaci[oó]n|implementation|expl[íi]came|explica|c[oó]mo\s+funciona|queries?|sql|dao|repositorio|service|servicio|m[eé]todos?|clase|class|business\s+logic|l[oó]gica)\b",
@@ -270,6 +275,10 @@ configs:
                   if graph_match:
                       class_name = graph_match.group(1)
                       return self._show_graph(body, class_name, repo, branch)
+      
+                  # ── Comando especial: listar repos indexados ──
+                  if _REPOS_LIST_RE.search(query):
+                      return self._list_repos(body)
       
                   # ── RAG automático: detectar repo/rama y buscar contexto ──
                   repo, branch = self._extract_repo_branch(query)
@@ -555,10 +564,18 @@ configs:
       
                   download_link = f'<a href="data:text/markdown;base64,{md_b64}" download="{title}.md">📄 Descargar Markdown</a>'
       
-                  body["messages"][-1]["content"] = (
-                      f"He generado un archivo Markdown con {len(results)} fragmentos de código recuperados. "
-                      f"Haz clic para descargarlo:\n\n{download_link}"
-                  )
+                  # Si el markdown no es enorme, también mostrarlo como texto copiable
+                  if len(md_content) < 8000:
+                      body["messages"][-1]["content"] = (
+                          f"He generado un archivo Markdown con {len(results)} fragmentos. "
+                          f"Podés descargarlo o copiarlo directamente:\n\n{download_link}\n\n"
+                          f"---\n\n```markdown\n{md_content}\n```"
+                      )
+                  else:
+                      body["messages"][-1]["content"] = (
+                          f"He generado un archivo Markdown con {len(results)} fragmentos ({len(md_content)} chars). "
+                          f"El contenido es muy grande para mostrarlo aquí, descargalo:\n\n{download_link}"
+                      )
                   print(f"[TennisDoc RAG] Markdown generado: {title}.md ({len(md_bytes)} bytes)")
               except Exception as e:
                   body["messages"][-1]["content"] = f"[Sistema] Error generando Markdown: {e}"
@@ -633,6 +650,32 @@ configs:
               except Exception as e:
                   body["messages"][-1]["content"] = f"No pude obtener el grafo para `{class_name}`. Error: {e}"
                   print(f"[TennisDoc RAG] ERROR mostrando grafo: {e}")
+              return body
+      
+          def _list_repos(self, body: dict) -> dict:
+              """Consulta al indexer la lista de repos indexados y la muestra en el chat."""
+              try:
+                  resp = requests.get(
+                      f"{self.valves.indexer_url}/repos",
+                      headers=self._headers(),
+                      timeout=10,
+                  )
+                  resp.raise_for_status()
+                  data = resp.json()
+                  repos = data.get("repos", [])
+                  if repos:
+                      lines = ["## Repositorios indexados 🗂️", ""]
+                      for r in repos:
+                          lines.append(f"- `{r}`")
+                      lines.append("")
+                      lines.append("Para consultar uno, escribí: `del repo org/repo-name ...`")
+                  else:
+                      lines = ["No hay repositorios indexados todavía.", "", "Indexá uno con: `indexa org/repo [rama]`"]
+                  body["messages"][-1]["content"] = "\n".join(lines)
+                  print(f"[TennisDoc RAG] Listado de repos: {len(repos)} repos")
+              except Exception as e:
+                  body["messages"][-1]["content"] = f"[Sistema] Error listando repos: {e}"
+                  print(f"[TennisDoc RAG] ERROR listando repos: {e}")
               return body
       
           def _build_context(self, results: list) -> str:
