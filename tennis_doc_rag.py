@@ -21,6 +21,8 @@ _BRANCH_RE = re.compile(r"(?:rama|branch)\s+(\S+)", re.IGNORECASE)
 _PDF_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?pdf", re.IGNORECASE)
 # Regex para detectar solicitud de Markdown / archivo MD
 _MD_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?(?:archivo\s+)?(?:markdown|md|\.md)", re.IGNORECASE)
+# Regex para comando especial "grafo NombreClase"
+_GRAPH_RE = re.compile(r"^\s*grafo\s+([A-Z][a-zA-Z0-9]*)\s*$", re.IGNORECASE)
 # Palabras que indican que el usuario busca implementación/código
 _IMPL_KEYWORDS = re.compile(
     r"\b(m[oó]dulo|module|implementaci[oó]n|implementation|expl[íi]came|explica|c[oó]mo\s+funciona|queries?|sql|dao|repositorio|service|servicio|m[eé]todos?|clase|class|business\s+logic|l[oó]gica)\b",
@@ -118,6 +120,12 @@ class Filter:
                 repo, branch = self._extract_repo_branch(query)
                 return self._generate_pdf(body, repo, branch)
 
+            # ── Comando especial: mostrar grafo de una clase ──
+            graph_match = _GRAPH_RE.search(query)
+            if graph_match:
+                class_name = graph_match.group(1)
+                return self._show_graph(body, class_name, repo, branch)
+
             # ── RAG automático: detectar repo/rama y buscar contexto ──
             repo, branch = self._extract_repo_branch(query)
             search_query = self._enrich_query(query)
@@ -125,41 +133,60 @@ class Filter:
 
             all_results = []
 
-            # 1) Búsqueda aumentada: archivos completos (no solo top chunks)
+            # 1) Búsqueda híbrida grafo + vectorial
             try:
                 payload = {
                     "query": search_query,
                     "repo": repo,
                     "branch": branch,
-                    "max_files": 5,
-                    "vector_limit": 50,
+                    "limit": self.valves.limit,
+                    "graph_depth": 2,
                 }
                 resp = requests.post(
-                    f"{self.valves.indexer_url}/search-augmented",
+                    f"{self.valves.indexer_url}/search-graph",
                     json={k: v for k, v in payload.items() if v is not None},
                     headers={"Content-Type": "application/json"},
-                    timeout=20,
+                    timeout=25,
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 all_results = data.get("results", [])
-                print(f"[TennisDoc RAG] Búsqueda aumentada: {len(all_results)} chunks de {data.get('files_fetched', 0)} archivos")
+                print(f"[TennisDoc RAG] Búsqueda grafo: {len(all_results)} resultados")
             except Exception as e:
-                print(f"[TennisDoc RAG] Fallback a /search: {e}")
-                # Fallback a búsqueda normal
-                payload = {"query": search_query, "limit": self.valves.limit}
-                if repo:
-                    payload["repo"] = repo
-                if branch:
-                    payload["branch"] = branch
-                resp = requests.post(
-                    f"{self.valves.indexer_url}/search",
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                all_results = resp.json().get("results", [])
+                print(f"[TennisDoc RAG] Fallback a /search-augmented: {e}")
+                try:
+                    payload = {
+                        "query": search_query,
+                        "repo": repo,
+                        "branch": branch,
+                        "max_files": 5,
+                        "vector_limit": 50,
+                    }
+                    resp = requests.post(
+                        f"{self.valves.indexer_url}/search-augmented",
+                        json={k: v for k, v in payload.items() if v is not None},
+                        headers={"Content-Type": "application/json"},
+                        timeout=20,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    all_results = data.get("results", [])
+                    print(f"[TennisDoc RAG] Búsqueda aumentada: {len(all_results)} chunks de {data.get('files_fetched', 0)} archivos")
+                except Exception as e2:
+                    print(f"[TennisDoc RAG] Fallback a /search: {e2}")
+                    payload = {"query": search_query, "limit": self.valves.limit}
+                    if repo:
+                        payload["repo"] = repo
+                    if branch:
+                        payload["branch"] = branch
+                    resp = requests.post(
+                        f"{self.valves.indexer_url}/search",
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+                    all_results = resp.json().get("results", [])
 
             # 2) Si la query menciona nombres de clase específicos, traer esos archivos directo
             class_names = _CLASS_NAME_RE.findall(query)
@@ -217,8 +244,10 @@ class Filter:
                         "Eres un asistente técnico especializado en el código fuente de la organización. "
                         f"Ámbito de búsqueda: {scope}. "
                         "Responde ÚNICAMENTE basándote en el siguiente contexto del código. "
+                        "El contexto incluye relaciones de grafo (herencia, implementaciones, métodos, campos, inyecciones de dependencias). "
                         "IMPORTANTE: los fragmentos pueden contener el código Java junto con las queries SQL referenciadas (marcadas como '-- Referenced SQL:'). "
                         "Busca en TODOS los fragmentos: firmas de métodos, implementaciones, queries SQL/JPQL, lógica de negocio y mapeo de entidades. "
+                        "Si una clase extiende o implementa otra, menciona la jerarquía completa. "
                         "Si la respuesta no está en el contexto, indica que no tienes información suficiente.\n\n"
                         f"{context}"
                     ),
@@ -381,8 +410,38 @@ class Filter:
             print(f"[TennisDoc RAG] ERROR generando PDF: {e}")
         return body
 
+    def _show_graph(self, body: dict, class_name: str, repo: str | None, branch: str | None) -> dict:
+        """Muestra las relaciones de una entidad del grafo."""
+        try:
+            params = {"repo": repo, "branch": branch}
+            resp = requests.get(
+                f"{self.valves.indexer_url}/graph/entity/{class_name}",
+                params={k: v for k, v in params.items() if v is not None},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            relations = data.get("relations", [])
+            lines = [f"## Grafo de dependencias: {class_name}", ""]
+            lines.append(f"**Tipo:** {data.get('type', 'Unknown')} | **Archivo:** `{data.get('file_path', 'N/A')}`")
+            if data.get('signature'):
+                lines.append(f"**Firma:** `{data['signature']}`")
+            lines.append("")
+            if relations:
+                lines.append("### Relaciones directas:")
+                for rel in relations:
+                    lines.append(f"- **{rel['rel_type']}** → `{rel['target_name']}` ({rel['target_type']})")
+            else:
+                lines.append("Sin relaciones directas indexadas.")
+            body["messages"][-1]["content"] = "\n".join(lines)
+            print(f"[TennisDoc RAG] Grafo mostrado para {class_name}")
+        except Exception as e:
+            body["messages"][-1]["content"] = f"No pude obtener el grafo para `{class_name}`. Error: {e}"
+            print(f"[TennisDoc RAG] ERROR mostrando grafo: {e}")
+        return body
+
     def _build_context(self, results: list) -> str:
-        """Formatea los chunks recuperados para el prompt."""
+        """Formatea los chunks recuperados para el prompt, incluyendo metadata de grafo."""
         parts = []
         for i, r in enumerate(results, 1):
             score = r.get("score", 0)
@@ -390,8 +449,17 @@ class Filter:
             repo = r.get("repo", "unknown")
             branch = r.get("branch", "")
             text = r.get("text", "")[:12000]
+            ast_type = r.get("ast_type", "")
+            ast_name = r.get("ast_name", "")
+            ast_signature = r.get("ast_signature", "")
+            source = r.get("source", "unknown")
             branch_info = f" | Rama: {branch}" if branch else ""
+            meta_parts = [f"Score: {score:.3f} | Source: {source} | Repo: {repo}{branch_info} | Archivo: {file_path}"]
+            if ast_name:
+                meta_parts.append(f"Entidad: {ast_type} {ast_name}")
+            if ast_signature:
+                meta_parts.append(f"Firma: {ast_signature}")
             parts.append(
-                f"[Fragmento {i}] Score: {score:.3f} | Repo: {repo}{branch_info} | Archivo: {file_path}\n```\n{text}\n```"
+                f"[Fragmento {i}] {' | '.join(meta_parts)}\n```\n{text}\n```"
             )
         return "\n\n---\n\n".join(parts)

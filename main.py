@@ -536,7 +536,7 @@ async def search_graph_endpoint(req: SearchGraphRequest):
 async def graph_entity(name: str, repo: str | None = None, branch: str | None = None):
     """Busca una entidad por nombre exacto y devuelve sus relaciones directas."""
     try:
-        result = rag_engine.search_entity_in_graph(name, repo=repo, branch=branch)
+        result = await rag_engine.search_entity_in_graph(name, repo=repo, branch=branch)
         if not result:
             raise HTTPException(status_code=404, detail=f"Entidad no encontrada: {name}")
         return result

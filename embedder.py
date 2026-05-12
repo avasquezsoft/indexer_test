@@ -16,10 +16,32 @@ async def get_embedding(text: str) -> list[float]:
     return embeddings[0]
 
 
+_BATCH_SIZE = 50  # máximo de textos por request a OpenRouter
+
+
 async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Genera embeddings para una lista de textos vía OpenRouter con reintentos."""
+    """Genera embeddings para una lista de textos vía OpenRouter con reintentos.
+
+    Divide automáticamente en sub-batches para evitar 'Too many tokens'.
+    """
     api_base = OPENROUTER_API_BASE.rstrip("/")
 
+    if not texts:
+        return []
+
+    all_embeddings: list[list[float]] = []
+
+    for batch_start in range(0, len(texts), _BATCH_SIZE):
+        batch = texts[batch_start : batch_start + _BATCH_SIZE]
+        batch_embeddings = await _embed_single_batch(batch, api_base)
+        all_embeddings.extend(batch_embeddings)
+        log.info("Embedding batch %s-%s/%s OK", batch_start + 1, batch_start + len(batch), len(texts))
+
+    return all_embeddings
+
+
+async def _embed_single_batch(texts: list[str], api_base: str) -> list[list[float]]:
+    """Envía un sub-batch a OpenRouter con reintentos."""
     last_error: Exception | None = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -49,7 +71,7 @@ async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
                 for i, emb in enumerate(embeddings):
                     if len(emb) != VECTOR_SIZE:
                         log.error(f"Embedding {i} tiene dimensión {len(emb)}, se esperaba {VECTOR_SIZE}")
-                        raise RuntimeError(f"Dimensión de embedding incorrecta: {len(emb)}")
+                        raise RuntimeError(f"Dimensión de embedding incorrecta: {len(emb)}. Verificá que OPENROUTER_EMBED_MODEL y VECTOR_SIZE coincidan.")
                     if any(v != v or v == float("inf") or v == float("-inf") for v in emb):
                         log.error(f"Embedding {i} contiene NaN o Inf")
                         raise RuntimeError("Embedding contiene valores inválidos (NaN/Inf)")
