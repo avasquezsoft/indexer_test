@@ -1,16 +1,12 @@
 """
 rag_engine.py — Motor de retrieval híbrido: vectorial (Qdrant) + grafo (Neo4j).
 
-Usa LlamaIndex como framework de orquestación con un retriever custom.
+Implementación propia sin dependencias externas pesadas (sin LlamaIndex).
 """
 
 import logging
-from typing import Any
-
-from llama_index.core import QueryBundle
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.retrievers import BaseRetriever
-from llama_index.core.schema import NodeWithScore, TextNode
+import re
+from dataclasses import dataclass, field
 
 import embedder
 import graph_store
@@ -19,10 +15,26 @@ from qdrant_store import get_client, search_chunks, QDRANT_COLLECTION
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════
-# Retriever híbrido custom
+# Modelos simples (reemplazan llama-index schema)
 # ═══════════════════════════════════════════════════════════════
 
-class CodeGraphRetriever(BaseRetriever):
+@dataclass
+class TextNode:
+    text: str
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class NodeWithScore:
+    node: TextNode
+    score: float
+
+
+# ═══════════════════════════════════════════════════════════════
+# Retriever híbrido
+# ═══════════════════════════════════════════════════════════════
+
+class CodeGraphRetriever:
     """
     Retriever que combina:
       1. Búsqueda vectorial en Qdrant (similitud semántica)
@@ -37,17 +49,14 @@ class CodeGraphRetriever(BaseRetriever):
         vector_limit: int = 30,
         graph_depth: int = 2,
         name_search_limit: int = 5,
-        **kwargs: Any,
     ):
         self.repo = repo
         self.branch = branch
         self.vector_limit = vector_limit
         self.graph_depth = graph_depth
         self.name_search_limit = name_search_limit
-        super().__init__(**kwargs)
 
-    async def _aretrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
-        query = query_bundle.query_str
+    async def retrieve(self, query: str) -> list[NodeWithScore]:
         nodes: dict[str, NodeWithScore] = {}
 
         # ── 1. Búsqueda vectorial ──
@@ -90,7 +99,6 @@ class CodeGraphRetriever(BaseRetriever):
                 for rel in related:
                     key = rel["id"]
                     if key in nodes:
-                        # Boost score si ya existe
                         nodes[key].score = max(nodes[key].score, 0.5 / rel.get("distance", 1))
                         continue
                     node = TextNode(
@@ -107,7 +115,6 @@ class CodeGraphRetriever(BaseRetriever):
                             "distance": rel.get("distance", 1),
                         },
                     )
-                    # Score decrece con la distancia en el grafo
                     distance = rel.get("distance", 1)
                     score = 0.6 / distance
                     nodes[key] = NodeWithScore(node=node, score=score)
@@ -115,9 +122,6 @@ class CodeGraphRetriever(BaseRetriever):
                 logger.warning("Error en expansión de grafo para %s: %s", eid, exc)
 
         # ── 3. Búsqueda por nombre exacto (keyword) ──
-        # Extraer posibles identificadores CamelCase de la query
-        import re
-        # Palabras comunes de patrones enterprise Java/Spring
         _SUFFIX_PATTERN = r"(?:Impl|Dao|Service|Repository|Mapper|Controller|Dto|Entity|Config|Util|Factory|Handler|Listener|Task|Job|Processor|Writer|Reader|Interceptor|Filter|Endpoint|Client|Provider|Adapter|Facade|Builder|Validator|Converter|Parser|Renderer|Generator|Scheduler|Resolver|Registry|Cache|Pool|Queue|Map|Tree|Node|Connection|Transaction|Context|Event|Message|Command|Query|Request|Response|Result|Source|Target|Reference|Wrapper|Proxy|Mock|Spy|Checker|Tester|Inspector|Finder|Searcher|Indexer|Extractor|Loader|Saver|Retriever|Updater|Creator|Initializer|Activator|Dispatcher|Router|Balancer|Distributor|Assigner|Configurer|Setter|Getter|Accessor|Builder|Producer|Consumer|Subscriber|Publisher|Emitter|Receiver|Sender|Transmitter|Host|Client|Server|Helper|Utility|Tool|Api|Sdk|Cli|Ui|Web|Rest|Soap|Grpc|Graphql|Websocket|Socket|Port|Channel|Pipe|Stream|Flow|Pipeline|Chain|Sequence|Batch|Bundle|Package|Module|Component|Part|Section|Segment|Fragment|Chunk|Block|Unit|Item|Element|Member|Field|Property|Attribute|Parameter|Argument|Option|Setting|Configuration|Policy|Rule|Strategy|Pattern|Template|Schema|Model|Blueprint|Plan|Design|Layout|Structure|Framework|Platform|System|Engine|Kernel|Core|Base|Root|Foundation|Layer|Tier|Level|Stage|Phase|Step|Action|Operation|Process|Procedure|Routine|Function|Method|Subroutine|Macro|Script|Program|Application|App)"
         candidates = re.findall(rf"\b([A-Z][a-zA-Z0-9]*(?:{_SUFFIX_PATTERN})?)\b", query)
         candidates = [c for c in candidates if len(c) > 2]
@@ -150,11 +154,6 @@ class CodeGraphRetriever(BaseRetriever):
         sorted_nodes = sorted(nodes.values(), key=lambda n: n.score, reverse=True)
         return sorted_nodes
 
-    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
-        # LlamaIndex requiere ambos métodos; el síncrono delega al async
-        import asyncio
-        return asyncio.get_event_loop().run_until_complete(self._aretrieve(query_bundle))
-
 
 # ═══════════════════════════════════════════════════════════════
 # API pública del RAG engine
@@ -177,8 +176,7 @@ async def search_graph(
         vector_limit=limit * 3,
         graph_depth=graph_depth,
     )
-    bundle = QueryBundle(query_str=query)
-    results = await retriever.aretrieve(bundle)
+    results = await retriever.retrieve(query)
 
     output = []
     for r in results[:limit]:
