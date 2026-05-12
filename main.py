@@ -15,7 +15,11 @@ from github_client import get_installation_token, get_repo_files, get_file_conte
 from chunker import chunk_file
 from embedder import get_embedding, get_embeddings_batch
 from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks, ping_client
-from config import QDRANT_COLLECTION, WEBHOOK_SECRET
+from config import QDRANT_COLLECTION, WEBHOOK_SECRET, VECTOR_SIZE, JAVAPARSER_URL
+
+import ast_parser
+import graph_store
+import rag_engine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -96,8 +100,32 @@ async def lifespan(app: FastAPI):
 
     client = get_client()
     ensure_collection(client, QDRANT_COLLECTION)
-    log.info(f"Qdrant collection '{QDRANT_COLLECTION}' lista")
+    log.info(f"Qdrant collection '{QDRANT_COLLECTION}' lista (dimensión {VECTOR_SIZE})")
+
+    # Inicializar Neo4j
+    try:
+        graph_store.init_schema()
+        neo4j_ok = graph_store.ping()
+        if neo4j_ok:
+            log.info("Neo4j conectado y schema inicializado")
+        else:
+            log.warning("Neo4j no responde al ping")
+    except Exception as exc:
+        log.warning("No se pudo inicializar Neo4j: %s", exc)
+
+    # Verificar JavaParser
+    try:
+        import httpx
+        resp = httpx.get(f"{JAVAPARSER_URL}/health", timeout=5.0)
+        if resp.status_code == 200:
+            log.info("JavaParser service disponible en %s", JAVAPARSER_URL)
+        else:
+            log.warning("JavaParser service respondió con status %s", resp.status_code)
+    except Exception as exc:
+        log.warning("JavaParser service no disponible: %s", exc)
+
     yield
+    graph_store.close_driver()
 
 
 app = FastAPI(title="Tennis Doc Indexer", lifespan=lifespan)
@@ -152,7 +180,10 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 # ─────────────────────────────────────────
 
 async def index_repo(full_repo_name: str, branch: str = "HEAD"):
-    """Indexa todos los archivos de un repo (rama específica). Corre en background."""
+    """
+    Indexa todos los archivos de un repo (rama específica) con pipeline profesional:
+    AST → Grafo (Neo4j) + Vectores (Qdrant). Corre en background.
+    """
     try:
         owner, repo = full_repo_name.split("/", 1)
         log.info(f"Indexando {full_repo_name} @ {branch}...")
@@ -162,15 +193,23 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
         log.info(f"Encontrados {len(files)} archivos en {full_repo_name} @ {branch}")
 
         client = get_client()
-        # Borrar solo los chunks de esta rama para no afectar otras ramas indexadas
+        # Borrar datos previos de esta rama en Qdrant y Neo4j
         delete_repo_chunks(client, QDRANT_COLLECTION, full_repo_name, branch=branch)
+        try:
+            graph_store.clear_repo(full_repo_name, branch)
+        except Exception as exc:
+            log.warning("No se pudo limpiar Neo4j para %s@%s: %s", full_repo_name, branch, exc)
 
         all_file_paths = {f["path"] for f in files}
         sql_files_map = {f["path"]: f for f in files if f["path"].lower().endswith(".sql")}
         log.info(f"Archivos SQL detectados en el repo: {len(sql_files_map)}")
 
+        total_entities = 0
         total_chunks = 0
         total_files = 0
+        all_entities: list = []
+        all_chunks: list = []
+
         for file_info in files:
             attempt = 0
             max_token_retries = 2
@@ -183,7 +222,19 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                         processed = True
                         continue
 
-                    chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
+                    # Detectar lenguaje desde extensión
+                    language = _detect_language_from_path(file_info["path"])
+
+                    # ── Pipeline AST + Grafo ──
+                    if language:
+                        entities, chunks = ast_parser.parse_file_to_chunks_and_entities(
+                            content, language, full_repo_name, branch, file_info["path"]
+                        )
+                    else:
+                        # Fallback: chunking clásico para lenguajes no soportados por AST
+                        chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
+                        entities = []
+
                     if not chunks:
                         log.warning(f"Sin chunks para {file_info['path']} (tamaño {len(content)} chars)")
                         processed = True
@@ -191,16 +242,23 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
                     # Si es Java, resolver referencias a SQL inline
                     if file_info["path"].lower().endswith(".java") and sql_files_map:
-                        chunks = await _inline_sql_references(
+                        chunks = await _inline_sql_references_ast(
                             chunks, token, owner, repo, branch, all_file_paths, sql_files_map
                         )
 
-                    texts = [c["metadata"]["embed_text"] for c in chunks]
-                    embeddings = await get_embeddings_batch(texts)
-                    upsert_chunks(client, QDRANT_COLLECTION, chunks, embeddings)
-                    total_chunks += len(chunks)
+                    all_entities.extend(entities)
+                    all_chunks.extend(chunks)
+                    total_entities += len(entities)
                     total_files += 1
-                    log.info(f"Indexado {file_info['path']}: {len(content)} chars → {len(chunks)} chunks")
+
+                    # Batch flush cada 500 entidades / 1000 chunks para no saturar memoria
+                    if len(all_entities) >= 500:
+                        await _flush_to_graph(client, all_entities, all_chunks)
+                        total_chunks += len(all_chunks)
+                        all_entities = []
+                        all_chunks = []
+
+                    log.info(f"Parseado {file_info['path']}: {len(content)} chars → {len(entities)} entidades, {len(chunks)} chunks")
                     processed = True
 
                 except GitHubTokenExpired:
@@ -216,10 +274,66 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                     log.warning(f"Error procesando {file_info['path']} en {full_repo_name}: {exc}")
                     processed = True
 
-        log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_chunks} chunks guardados")
+        # Flush final
+        if all_entities or all_chunks:
+            await _flush_to_graph(client, all_entities, all_chunks)
+            total_chunks += len(all_chunks)
+
+        log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_entities} entidades, {total_chunks} chunks guardados")
 
     except Exception as e:
         log.error(f"Error indexando {full_repo_name} @ {branch}: {e}")
+
+
+def _detect_language_from_path(file_path: str) -> str | None:
+    ext = file_path.lower().split(".")[-1] if "." in file_path else ""
+    mapping = {
+        "java": "java", "py": "python", "js": "javascript", "ts": "typescript",
+        "jsx": "javascript", "tsx": "typescript", "go": "go",
+    }
+    return mapping.get(ext)
+
+
+async def _flush_to_graph(client, entities: list, chunks: list):
+    """Persiste entidades en Neo4j y chunks en Qdrant."""
+    if entities:
+        try:
+            graph_store.upsert_entities(entities)
+        except Exception as exc:
+            log.error("Error guardando entidades en Neo4j: %s", exc)
+    if chunks:
+        try:
+            texts = [c["metadata"]["embed_text"] for c in chunks]
+            embeddings = await get_embeddings_batch(texts)
+            upsert_chunks(client, QDRANT_COLLECTION, chunks, embeddings)
+        except Exception as exc:
+            log.error("Error guardando chunks en Qdrant: %s", exc)
+
+
+async def _inline_sql_references_ast(
+    chunks: list[dict],
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    all_file_paths: set[str],
+    sql_files_map: dict[str, dict],
+) -> list[dict]:
+    """Resuelve referencias a archivos .sql dentro de chunks y adjunta el contenido SQL."""
+    for chunk in chunks:
+        for match in _SQL_REF_RE.finditer(chunk["text"]):
+            sql_ref = match.group(1)
+            resolved = _resolve_sql_path(chunk["metadata"].get("file_path", ""), sql_ref, all_file_paths)
+            if resolved and resolved in sql_files_map:
+                try:
+                    sql_content = get_file_content(token, owner, repo, resolved, ref=branch)
+                    if sql_content and sql_content.strip():
+                        sql_header = f"\n\n-- Referenced SQL: {resolved} --\n"
+                        chunk["text"] += sql_header + sql_content
+                        chunk["metadata"]["embed_text"] += sql_header + sql_content
+                except Exception as exc:
+                    log.debug(f"No se pudo leer SQL referenciado {resolved}: {exc}")
+    return chunks
 
 
 # ─────────────────────────────────────────
@@ -382,6 +496,66 @@ async def search_augmented(req: SearchAugmentedRequest):
 
     log.info(f"Búsqueda aumentada completada: {len(all_chunks)} chunks de {len(top_files)} archivos")
     return {"results": all_chunks, "files_fetched": len(top_files)}
+
+
+# ─────────────────────────────────────────
+# Búsqueda híbrida con Grafo (LlamaIndex)
+# ─────────────────────────────────────────
+
+class SearchGraphRequest(BaseModel):
+    query: str
+    repo: str | None = None
+    branch: str | None = None
+    limit: int = 12
+    graph_depth: int = 2
+
+
+@app.post("/search-graph")
+async def search_graph_endpoint(req: SearchGraphRequest):
+    """
+    Búsqueda híbrida: vectorial (Qdrant) + grafo (Neo4j) + keyword.
+    Usa LlamaIndex como orquestador de retrieval.
+    """
+    log.info(f"Búsqueda grafo: query='{req.query[:60]}...' repo={req.repo} branch={req.branch}")
+    try:
+        results = await rag_engine.search_graph(
+            query=req.query,
+            repo=req.repo,
+            branch=req.branch,
+            limit=req.limit,
+            graph_depth=req.graph_depth,
+        )
+        log.info(f"Búsqueda grafo completada: {len(results)} resultados")
+        return {"results": results}
+    except Exception as exc:
+        log.error(f"Error en búsqueda grafo: {exc}")
+        raise HTTPException(status_code=500, detail=f"Error en búsqueda híbrida: {exc}")
+
+
+@app.get("/graph/entity/{name}")
+async def graph_entity(name: str, repo: str | None = None, branch: str | None = None):
+    """Busca una entidad por nombre exacto y devuelve sus relaciones directas."""
+    try:
+        result = rag_engine.search_entity_in_graph(name, repo=repo, branch=branch)
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Entidad no encontrada: {name}")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error(f"Error consultando grafo para {name}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/graph/related/{entity_id}")
+async def graph_related(entity_id: str, depth: int = 2):
+    """Devuelve entidades relacionadas en el grafo desde un ID dado."""
+    try:
+        related = graph_store.get_related_entities(entity_id, depth=depth)
+        return {"entity_id": entity_id, "depth": depth, "related": related}
+    except Exception as exc:
+        log.error(f"Error obteniendo relaciones para {entity_id}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ─────────────────────────────────────────
@@ -673,6 +847,24 @@ async def debug_chunks(repo: str, file_path: str, branch: str = "HEAD"):
 async def health():
     client = get_client()
     qdrant_ok = ping_client(client)
+    neo4j_ok = graph_store.ping()
+    javaparser_ok = False
+    try:
+        import httpx
+        resp = httpx.get(f"{JAVAPARSER_URL}/health", timeout=5.0)
+        javaparser_ok = resp.status_code == 200
+    except Exception:
+        pass
+
     if not qdrant_ok:
         raise HTTPException(status_code=503, detail="Qdrant no responde")
-    return {"status": "ok", "qdrant": "reachable"}
+
+    status = {
+        "status": "ok",
+        "qdrant": "reachable" if qdrant_ok else "unreachable",
+        "neo4j": "reachable" if neo4j_ok else "unreachable",
+        "javaparser": "reachable" if javaparser_ok else "unreachable",
+    }
+    if not neo4j_ok or not javaparser_ok:
+        status["status"] = "degraded"
+    return status

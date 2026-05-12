@@ -9,10 +9,7 @@ from qdrant_client.models import (
     MatchValue,
 )
 
-from config import QDRANT_URL, QDRANT_API_KEY
-
-# Dimensión del modelo text-embedding-3-small (OpenRouter)
-VECTOR_SIZE = 1536
+from config import QDRANT_URL, QDRANT_API_KEY, VECTOR_SIZE, QDRANT_COLLECTION
 
 
 def get_client() -> QdrantClient:
@@ -85,9 +82,11 @@ def upsert_chunks(client: QdrantClient, collection: str, chunks: list[dict], emb
     """Guarda los chunks con sus embeddings en Qdrant."""
     points = []
     for chunk, embedding in zip(chunks, embeddings):
+        # Usar entity_id como ID si está disponible (idempotencia), sino UUID
+        chunk_id = chunk["metadata"].get("entity_id") or str(uuid.uuid4())
         points.append(
             PointStruct(
-                id=str(uuid.uuid4()),
+                id=chunk_id,
                 vector=embedding,
                 payload={
                     "repo": chunk["metadata"]["repo"],
@@ -96,6 +95,10 @@ def upsert_chunks(client: QdrantClient, collection: str, chunks: list[dict], emb
                     "language": chunk["metadata"]["language"],
                     "position": chunk["metadata"]["position"],
                     "text": chunk["text"],
+                    "entity_id": chunk["metadata"].get("entity_id"),
+                    "ast_type": chunk["metadata"].get("ast_type"),
+                    "ast_name": chunk["metadata"].get("ast_name"),
+                    "ast_signature": chunk["metadata"].get("ast_signature"),
                 },
             )
         )
@@ -145,6 +148,10 @@ def search_chunks(client: QdrantClient, collection: str, query_vector: list[floa
                 "file_path": r.payload.get("file_path", "unknown"),
                 "language": r.payload.get("language", "unknown"),
                 "text": r.payload.get("text", ""),
+                "entity_id": r.payload.get("entity_id"),
+                "ast_type": r.payload.get("ast_type"),
+                "ast_name": r.payload.get("ast_name"),
+                "ast_signature": r.payload.get("ast_signature"),
             })
         except Exception as exc:
             log.warning(f"Chunk con payload incompleto descartado: {exc}")

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import httpx
 
-from config import OPENROUTER_API_BASE, OPENROUTER_API_KEY, OPENROUTER_EMBED_MODEL
+from config import OPENROUTER_API_BASE, OPENROUTER_API_KEY, OPENROUTER_EMBED_MODEL, VECTOR_SIZE
 
 log = logging.getLogger(__name__)
 
@@ -47,8 +47,8 @@ async def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
                 embeddings = [item["embedding"] for item in data["data"]]
                 # Validar: no NaN/Inf, dimensión correcta
                 for i, emb in enumerate(embeddings):
-                    if len(emb) != 1536:
-                        log.error(f"Embedding {i} tiene dimensión {len(emb)}, se esperaba 1536")
+                    if len(emb) != VECTOR_SIZE:
+                        log.error(f"Embedding {i} tiene dimensión {len(emb)}, se esperaba {VECTOR_SIZE}")
                         raise RuntimeError(f"Dimensión de embedding incorrecta: {len(emb)}")
                     if any(v != v or v == float("inf") or v == float("-inf") for v in emb):
                         log.error(f"Embedding {i} contiene NaN o Inf")

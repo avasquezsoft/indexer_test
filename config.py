@@ -6,6 +6,7 @@ import os
 # ─────────────────────────────────────────
 
 INDEXER_REPO_URL = os.environ["INDEXER_REPO_URL"]
+PARSER_JAVA_REPO_URL = os.environ.get("PARSER_JAVA_REPO_URL", "")
 
 # GitHub App
 GITHUB_APP_ID = os.environ["GITHUB_APP_ID"]
@@ -23,6 +24,17 @@ OPENROUTER_EMBED_MODEL = os.environ["OPENROUTER_EMBED_MODEL"]
 QDRANT_URL = os.environ["QDRANT_URL"]
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION")
+
+# Neo4j
+NEO4J_URL = os.environ["NEO4J_URL"]
+NEO4J_USER = os.environ["NEO4J_USER"]
+NEO4J_PASSWORD = os.environ["NEO4J_PASSWORD"]
+
+# Vector size (dimensión del modelo de embeddings)
+VECTOR_SIZE = int(os.environ.get("VECTOR_SIZE", "1024"))
+
+# JavaParser service
+JAVAPARSER_URL = os.environ.get("JAVAPARSER_URL", "http://javaparser:8080")
 
 # Webhook
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
