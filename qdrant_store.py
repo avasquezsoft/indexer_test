@@ -93,8 +93,9 @@ def upsert_chunks(client: QdrantClient, collection: str, chunks: list[dict], emb
     """Guarda los chunks con sus embeddings en Qdrant."""
     points = []
     for chunk, embedding in zip(chunks, embeddings):
-        # Usar entity_id como ID si está disponible (idempotencia), sino UUID
-        chunk_id = chunk["metadata"].get("entity_id") or str(uuid.uuid4())
+        # Qdrant requiere IDs válidos (UUID o entero). Los entity_id largos con '/' y ':'
+        # no son aceptados como IDs de punto. Usamos UUID y guardamos entity_id en payload.
+        chunk_id = str(uuid.uuid4())
         points.append(
             PointStruct(
                 id=chunk_id,
