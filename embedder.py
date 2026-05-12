@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 2  # segundos
 _BATCH_SIZE = 50  # máximo de textos por request a OpenRouter
-_MAX_EMBED_CHARS = 30000  # ~7500 tokens para código (estimación conservadora < 8192)
+_MAX_EMBED_CHARS = 20000  # ~6500 tokens para código (margen seguro < 8192)
 
 
 async def get_embedding(text: str) -> list[float]:
