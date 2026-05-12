@@ -10,6 +10,7 @@ description: >
 """
 
 import base64
+import os
 import re
 import requests
 
@@ -48,6 +49,13 @@ class Filter:
             self.indexer_url = "http://indexer:8001"
             self.limit = 20
             self.default_branch = "prod"
+            self.api_key = os.environ.get("INDEXER_API_KEY", "")
+
+    def _headers(self):
+        h = {"Content-Type": "application/json"}
+        if self.valves.api_key:
+            h["Authorization"] = f"Bearer {self.valves.api_key}"
+        return h
 
     def _enrich_query(self, query: str) -> str:
         """Enriquece la query del usuario con keywords técnicas para mejorar retrieval."""
@@ -161,7 +169,7 @@ class Filter:
                 resp = requests.post(
                     f"{self.valves.indexer_url}/search-augmented",
                     json={k: v for k, v in payload.items() if v is not None},
-                    headers={"Content-Type": "application/json"},
+                    headers=self._headers(),
                     timeout=25,
                 )
                 resp.raise_for_status()
@@ -184,7 +192,7 @@ class Filter:
                 resp = requests.post(
                     f"{self.valves.indexer_url}/search-graph",
                     json={k: v for k, v in payload.items() if v is not None},
-                    headers={"Content-Type": "application/json"},
+                    headers=self._headers(),
                     timeout=25,
                 )
                 resp.raise_for_status()
@@ -263,7 +271,7 @@ class Filter:
                                     fetch_resp = requests.post(
                                         f"{self.valves.indexer_url}/fetch-file",
                                         json={"repo": repo, "file_path": file_path, "branch": branch or self.valves.default_branch},
-                                        headers={"Content-Type": "application/json"},
+                                        headers=self._headers(),
                                         timeout=10,
                                     )
                                     fetch_resp.raise_for_status()
@@ -326,7 +334,7 @@ class Filter:
             resp = requests.post(
                 f"{self.valves.indexer_url}/index",
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers=self._headers(),
                 timeout=5,
             )
             data = resp.json()
@@ -358,7 +366,7 @@ class Filter:
             resp = requests.post(
                 f"{self.valves.indexer_url}/search-augmented",
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers=self._headers(),
                 timeout=20,
             )
             resp.raise_for_status()
@@ -401,7 +409,7 @@ class Filter:
             resp = requests.post(
                 f"{self.valves.indexer_url}/markdown",
                 json={"title": title, "content": md_content, "repo": repo, "branch": branch},
-                headers={"Content-Type": "application/json"},
+                headers=self._headers(),
                 timeout=30,
             )
             resp.raise_for_status()
@@ -441,7 +449,7 @@ class Filter:
             resp = requests.post(
                 f"{self.valves.indexer_url}/pdf",
                 json={"title": title, "content": content, "repo": repo, "branch": branch},
-                headers={"Content-Type": "application/json"},
+                headers=self._headers(),
                 timeout=30,
             )
             resp.raise_for_status()

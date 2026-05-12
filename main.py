@@ -5,7 +5,7 @@ import os
 import re
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
@@ -15,7 +15,7 @@ from github_client import get_installation_token, get_repo_files, get_file_conte
 from chunker import chunk_file
 from embedder import get_embedding, get_embeddings_batch
 from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks, ping_client
-from config import QDRANT_COLLECTION, WEBHOOK_SECRET, VECTOR_SIZE, JAVAPARSER_URL
+from config import QDRANT_COLLECTION, WEBHOOK_SECRET, VECTOR_SIZE, JAVAPARSER_URL, INDEXER_API_KEY
 
 import ast_parser
 import graph_store
@@ -136,6 +136,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Tennis Doc Indexer", lifespan=lifespan)
+
+# ─────────────────────────────────────────
+# Protección de endpoints (API Key)
+# ─────────────────────────────────────────
+
+def verify_api_key(authorization: str | None = Header(None)):
+    """Valida el header Authorization Bearer si INDEXER_API_KEY está configurada."""
+    if not INDEXER_API_KEY:
+        return True
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Falta header Authorization")
+    if authorization != f"Bearer {INDEXER_API_KEY}":
+        raise HTTPException(status_code=403, detail="API key inválida")
+    return True
 
 # CORS básico para permitir llamadas desde el frontend / Open WebUI
 app.add_middleware(
@@ -368,7 +382,7 @@ class IndexRequest(BaseModel):
         return v
 
 
-@app.post("/index")
+@app.post("/index", dependencies=[Depends(verify_api_key)])
 async def manual_index(req: IndexRequest, background_tasks: BackgroundTasks):
     """Dispara indexación manual de un repo (rama opcional)."""
     background_tasks.add_task(index_repo, req.repo, req.branch)
@@ -386,7 +400,7 @@ class SearchRequest(BaseModel):
     limit: int = 6
 
 
-@app.post("/search")
+@app.post("/search", dependencies=[Depends(verify_api_key)])
 async def search(req: SearchRequest):
     """Busca chunks relevantes para una pregunta."""
     log.info(f"Búsqueda recibida: query='{req.query[:60]}...' repo={req.repo} branch={req.branch} limit={req.limit}")
@@ -423,7 +437,7 @@ class SearchAugmentedRequest(BaseModel):
     vector_limit: int = 50   # cuántos chunks vectoriales usar para identificar archivos
 
 
-@app.post("/search-augmented")
+@app.post("/search-augmented", dependencies=[Depends(verify_api_key)])
 async def search_augmented(req: SearchAugmentedRequest):
     """
     Búsqueda híbrida:
@@ -526,7 +540,7 @@ class SearchGraphRequest(BaseModel):
     graph_depth: int = 2
 
 
-@app.post("/search-graph")
+@app.post("/search-graph", dependencies=[Depends(verify_api_key)])
 async def search_graph_endpoint(req: SearchGraphRequest):
     """
     Búsqueda híbrida: vectorial (Qdrant) + grafo (Neo4j) + keyword.
@@ -548,7 +562,7 @@ async def search_graph_endpoint(req: SearchGraphRequest):
         raise HTTPException(status_code=500, detail=f"Error en búsqueda híbrida: {exc}")
 
 
-@app.get("/graph/entity/{name}")
+@app.get("/graph/entity/{name}", dependencies=[Depends(verify_api_key)])
 async def graph_entity(name: str, repo: str | None = None, branch: str | None = None):
     """Busca una entidad por nombre exacto y devuelve sus relaciones directas."""
     try:
@@ -563,7 +577,7 @@ async def graph_entity(name: str, repo: str | None = None, branch: str | None = 
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/graph/related/{entity_id}")
+@app.get("/graph/related/{entity_id}", dependencies=[Depends(verify_api_key)])
 async def graph_related(entity_id: str, depth: int = 2):
     """Devuelve entidades relacionadas en el grafo desde un ID dado."""
     try:
@@ -584,7 +598,7 @@ class FetchFileRequest(BaseModel):
     branch: str = "HEAD"
 
 
-@app.post("/fetch-file")
+@app.post("/fetch-file", dependencies=[Depends(verify_api_key)])
 async def fetch_file(req: FetchFileRequest):
     """Trae el contenido crudo de un archivo específico desde GitHub."""
     try:
@@ -667,7 +681,7 @@ class PdfRequest(BaseModel):
     branch: str | None = None
 
 
-@app.post("/pdf")
+@app.post("/pdf", dependencies=[Depends(verify_api_key)])
 async def generate_pdf(req: PdfRequest):
     """Genera un PDF a partir de markdown/texto plano."""
     if not _HAS_FPDF:
@@ -726,7 +740,7 @@ class MarkdownRequest(BaseModel):
     branch: str | None = None
 
 
-@app.post("/markdown")
+@app.post("/markdown", dependencies=[Depends(verify_api_key)])
 async def generate_markdown(req: MarkdownRequest):
     """Genera un archivo .md descargable a partir de contenido markdown."""
     filename = f"{req.title.replace(' ', '_')}.md"
@@ -752,7 +766,7 @@ async def generate_markdown(req: MarkdownRequest):
 # Endpoints de diagnóstico
 # ─────────────────────────────────────────
 
-@app.get("/debug/files")
+@app.get("/debug/files", dependencies=[Depends(verify_api_key)])
 async def debug_files(repo: str, branch: str = "HEAD"):
     """Lista los archivos que serían indexados (sin indexar)."""
     try:
@@ -764,7 +778,7 @@ async def debug_files(repo: str, branch: str = "HEAD"):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/debug/files-indexed")
+@app.get("/debug/files-indexed", dependencies=[Depends(verify_api_key)])
 async def debug_files_indexed(repo: str, branch: str = "HEAD", language: str | None = None):
     """Lista los file_paths únicos que YA están indexados en Qdrant para un repo/rama."""
     try:
@@ -814,7 +828,7 @@ async def debug_files_indexed(repo: str, branch: str = "HEAD", language: str | N
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/debug/chunks")
+@app.get("/debug/chunks", dependencies=[Depends(verify_api_key)])
 async def debug_chunks(repo: str, file_path: str, branch: str = "HEAD"):
     """Muestra los chunks guardados en Qdrant para un archivo específico."""
     try:

@@ -38,3 +38,6 @@ JAVAPARSER_URL = os.environ.get("JAVAPARSER_URL", "http://javaparser:8080")
 
 # Webhook
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+
+# API Key para proteger endpoints públicos (opcional pero recomendado)
+INDEXER_API_KEY = os.environ.get("INDEXER_API_KEY", "")
