@@ -71,7 +71,9 @@ async def _inline_sql_references(
     """
     Busca referencias a archivos .sql dentro de los chunks y adjunta
     el contenido SQL al mismo chunk (text + embed_text).
+    Si el SQL es muy grande se trunca para no romper los límites de embedding.
     """
+    _MAX_INLINE_SQL_CHARS = 6000
     for chunk in chunks:
         for match in _SQL_REF_RE.finditer(chunk["text"]):
             sql_ref = match.group(1)
@@ -80,6 +82,11 @@ async def _inline_sql_references(
                 try:
                     sql_content = get_file_content(token, owner, repo, resolved, ref=branch)
                     if sql_content and sql_content.strip():
+                        if len(sql_content) > _MAX_INLINE_SQL_CHARS:
+                            sql_content = (
+                                sql_content[:_MAX_INLINE_SQL_CHARS]
+                                + f"\n-- ... SQL truncado ({len(sql_content)} chars originales) ... --\n"
+                            )
                         sql_header = f"\n\n-- Referenced SQL: {resolved} --\n"
                         chunk["text"] += sql_header + sql_content
                         chunk["metadata"]["embed_text"] += sql_header + sql_content
@@ -321,7 +328,9 @@ async def _inline_sql_references_ast(
     all_file_paths: set[str],
     sql_files_map: dict[str, dict],
 ) -> list[dict]:
-    """Resuelve referencias a archivos .sql dentro de chunks y adjunta el contenido SQL."""
+    """Resuelve referencias a archivos .sql dentro de chunks y adjunta el contenido SQL.
+    Si el SQL es muy grande se trunca para no romper los límites de embedding."""
+    _MAX_INLINE_SQL_CHARS = 6000
     for chunk in chunks:
         for match in _SQL_REF_RE.finditer(chunk["text"]):
             sql_ref = match.group(1)
@@ -330,6 +339,11 @@ async def _inline_sql_references_ast(
                 try:
                     sql_content = get_file_content(token, owner, repo, resolved, ref=branch)
                     if sql_content and sql_content.strip():
+                        if len(sql_content) > _MAX_INLINE_SQL_CHARS:
+                            sql_content = (
+                                sql_content[:_MAX_INLINE_SQL_CHARS]
+                                + f"\n-- ... SQL truncado ({len(sql_content)} chars originales) ... --\n"
+                            )
                         sql_header = f"\n\n-- Referenced SQL: {resolved} --\n"
                         chunk["text"] += sql_header + sql_content
                         chunk["metadata"]["embed_text"] += sql_header + sql_content
