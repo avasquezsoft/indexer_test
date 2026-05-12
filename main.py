@@ -193,6 +193,8 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
         log.info(f"Encontrados {len(files)} archivos en {full_repo_name} @ {branch}")
 
         client = get_client()
+        # Asegurar que la colección existe (puede haber sido borrada manualmente)
+        ensure_collection(client, QDRANT_COLLECTION)
         # Borrar datos previos de esta rama en Qdrant y Neo4j
         delete_repo_chunks(client, QDRANT_COLLECTION, full_repo_name, branch=branch)
         try:

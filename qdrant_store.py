@@ -68,7 +68,18 @@ def ensure_collection(client: QdrantClient, collection: str):
 
 
 def delete_repo_chunks(client: QdrantClient, collection: str, repo: str, branch: str | None = None):
-    """Elimina todos los chunks de un repo (opcionalmente filtrado por rama)."""
+    """Elimina todos los chunks de un repo (opcionalmente filtrado por rama).
+
+    Si la colección no existe, se ignora silenciosamente.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    existing_names = [c.name for c in client.get_collections().collections]
+    if collection not in existing_names:
+        log.info("Colección '%s' no existe, nada que borrar", collection)
+        return
+
     conditions = [FieldCondition(key="repo", match=MatchValue(value=repo))]
     if branch:
         conditions.append(FieldCondition(key="branch", match=MatchValue(value=branch)))
