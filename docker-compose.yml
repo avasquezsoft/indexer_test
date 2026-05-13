@@ -110,7 +110,7 @@ services:
       - neo4j
       - javaparser
   tennis-doc:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:latest
     container_name: tennis-doc
     restart: unless-stopped
     ports:

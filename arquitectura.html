@@ -344,12 +344,12 @@
 flowchart TD
     GH["🐙 GitHub\n(organización)"]:::ext
     IDX["⚡ Indexador\nPython · FastAPI"]:::core
-    OR1["🤖 OpenRouter API\ncodestral-embed-2505\n1024 dims"]:::ext
+    OR1["🤖 OpenRouter API\nqwen/qwen3-embedding-8b\n1024 dims"]:::ext
     JP["☕ JavaParser\nJavalin · AST"]:::svc
     NEO["🕸️ Neo4j\nGraph DB"]:::db
     QDR["🔷 Qdrant\nVector DB"]:::db
     LLM["🔀 LiteLLM\nAPI Gateway"]:::core
-    OR2["🤖 OpenRouter API\nkimi-k2.6 · gpt-4o-mini"]:::ext
+    OR2["🤖 OpenRouter API\ndeepseek/deepseek-v4-pro · deepseek-v4-flash"]:::ext
     OWU["💬 Open WebUI\nChat Interface"]:::ui
     PG["🐘 Postgres\nLiteLLM metadata"]:::db
 
@@ -416,7 +416,7 @@ flowchart TD
             </div>
             <div class="card">
                 <h4>OpenRouter <span class="badge badge-blue">Proveedor IA</span></h4>
-                <p>API externa que provee embeddings (<code>codestral-embed-2505</code>, 1024 dims) y modelos de chat (<code>kimi-k2.6</code> principal, <code>gpt-4o-mini</code> fallback).</p>
+                <p>API externa que provee embeddings (<code>qwen/qwen3-embedding-8b</code>, 1024 dims) y modelos de chat (<code>deepseek/deepseek-v4-pro</code> principal, <code>deepseek/deepseek-v4-flash</code> fallback).</p>
             </div>
         </div>
     </section>
@@ -445,7 +445,7 @@ sequenceDiagram
     IDX->>JP: código Java/Spring Boot
     JP-->>IDX: AST (clases, métodos, anotaciones)
     IDX->>NEO: upsert CodeEntity + relaciones
-    IDX->>OR: chunks → codestral-embed-2505
+    IDX->>OR: chunks → qwen/qwen3-embedding-8b
     OR-->>IDX: vectores 1024 dims
     IDX->>QDR: batch upsert (100 puntos + metadata)
             </div>
@@ -475,7 +475,7 @@ sequenceDiagram
     NEO-->>IDX: relaciones y dependencias
     IDX-->>RAG: contexto enriquecido
     RAG->>LLM: system context + pregunta
-    LLM->>OR: kimi-k2.6 (fallback gpt-4o-mini)
+    LLM->>OR: deepseek/deepseek-v4-pro (fallback deepseek-v4-flash)
     OR-->>LLM: respuesta generada
     LLM-->>OWU: markdown estructurado
     OWU-->>USR: respuesta con jerarquía y código
@@ -524,7 +524,10 @@ flowchart LR
             <p><strong>Ver grafo de una clase:</strong> escribe <code>grafo NombreClase</code> en el chat y la función consultará Neo4j para mostrar sus relaciones directas (herencia, implementaciones, métodos, campos, inyecciones).</p>
         </div>
         <div class="highlight-box">
-            <p><strong>Exportar a Markdown:</strong> escribe <code>generame un md con toda la info del módulo X</code> y la función armará un archivo <code>.md</code> estructurado con todos los chunks recuperados, listo para descargar.</p>
+            <p><strong>Listar repos:</strong> escribe <code>repos</code> en el chat para ver todos los repositorios indexados.</p>
+        </div>
+        <div class="highlight-box">
+            <p><strong>Exportar a Markdown:</strong> escribe <code>generame un md con toda la info del módulo X</code>, <code>guardar como markdown</code> o <code>exportar a md</code>. Si el contenido es pequeño se muestra en el chat; si es grande se genera un archivo descargable.</p>
         </div>
 
         <h3>Activación en Dokploy / Docker Compose</h3>
@@ -584,6 +587,7 @@ indexer/
                 <tr><td><code>POST</code></td><td><code>/search-graph</code></td><td><strong>Búsqueda híbrida principal</strong>: vector + grafo + keyword vía LlamaIndex.</td></tr>
                 <tr><td><code>GET</code></td><td><code>/graph/entity/{name}</code></td><td>Busca una entidad por nombre y devuelve sus relaciones directas.</td></tr>
                 <tr><td><code>GET</code></td><td><code>/graph/related/{entity_id}</code></td><td>Navega vecinos en el grafo desde una entidad.</td></tr>
+                <tr><td><code>GET</code></td><td><code>/repos</code></td><td>Lista repos únicos indexados en Neo4j.</td></tr>
                 <tr><td><code>POST</code></td><td><code>/fetch-file</code></td><td>Trae el contenido crudo de un archivo específico desde GitHub.</td></tr>
                 <tr><td><code>POST</code></td><td><code>/pdf</code></td><td>Genera PDF descargable a partir de markdown/texto.</td></tr>
                 <tr><td><code>POST</code></td><td><code>/markdown</code></td><td>Genera archivo <code>.md</code> descargable a partir de contenido markdown.</td></tr>
@@ -607,7 +611,7 @@ indexer/
             <tbody>
                 <tr><td rowspan="3">OpenRouter</td><td><code>OPENROUTER_API_BASE</code></td><td>URL base (<code>https://openrouter.ai/api/v1</code>)</td></tr>
                 <tr><td><code>OPENROUTER_API_KEY</code></td><td>API key de OpenRouter</td></tr>
-                <tr><td><code>OPENROUTER_EMBED_MODEL</code></td><td>Modelo de embeddings (<code>mistralai/codestral-embed-2505</code>, 1024 dims)</td></tr>
+                <tr><td><code>OPENROUTER_EMBED_MODEL</code></td><td>Modelo de embeddings (<code>qwen/qwen3-embedding-8b</code>, 1024 dims)</td></tr>
                 <tr><td rowspan="2">LiteLLM</td><td><code>LITELLM_MASTER_KEY</code></td><td>Clave maestra interna entre servicios</td></tr>
                 <tr><td><code>DATABASE_URL</code></td><td>Conexión Postgres (<code>postgresql://...</code>)</td></tr>
                 <tr><td rowspan="2">Qdrant</td><td><code>QDRANT_API_KEY</code></td><td>Clave de acceso a Qdrant</td></tr>
@@ -619,6 +623,7 @@ indexer/
                 <tr><td rowspan="2">GitHub App</td><td><code>GITHUB_APP_ID</code></td><td>ID numérico de la GitHub App</td></tr>
                 <tr><td><code>GITHUB_APP_PRIVATE_KEY</code></td><td>Contenido del <code>.pem</code> en una sola línea</td></tr>
                 <tr><td>Seguridad</td><td><code>WEBHOOK_SECRET</code></td><td>Secreto para validar webhooks de GitHub</td></tr>
+                <tr><td>Seguridad</td><td><code>INDEXER_API_KEY</code></td><td>Protege endpoints públicos del indexer (Bearer token)</td></tr>
             </tbody>
         </table>
         <div class="highlight-box">
@@ -632,16 +637,18 @@ indexer/
     <section>
         <h2>Mejoras recientes</h2>
         <div class="grid-2">
-            <div class="card"><h4>🧠 Arquitectura v2.0: AST + Grafo + LlamaIndex</h4><p>Se migró de chunking textual básico a parseo AST profesional. Tree-sitter y JavaParser extraen clases, métodos, campos y relaciones. Neo4j almacena el grafo de dependencias. LlamaIndex orquesta retrieval híbrido.</p></div>
-            <div class="card"><h4>🕸️ Grafo de dependencias</h4><p>Neo4j indexa relaciones tipadas: EXTENDS, IMPLEMENTS, HAS_METHOD, HAS_FIELD, CALLS, INJECTED, ANNOTATED_WITH. El endpoint <code>/graph/entity/{name}</code> permite consultar jerarquías directamente.</p></div>
-            <div class="card"><h4>🔍 Búsqueda híbrida /search-graph</h4><p>Combina búsqueda vectorial en Qdrant, navegación de grafo en Neo4j y keyword search por nombres de clase (CamelCase). Devuelve contexto mucho más completo que la búsqueda puramente vectorial.</p></div>
-            <div class="card"><h4>🧠 Query enrichment</h4><p>El RAG detecta preguntas sobre módulos y enriquece automáticamente la query con keywords técnicas para recuperar DAOs e implementaciones.</p></div>
-            <div class="card"><h4>📎 SQL Inline Resolver</h4><p>Cuando un <code>.java</code> referencia un <code>.sql</code>, el contenido de la query se incrusta en el chunk Java como <code>-- Referenced SQL:</code>.</p></div>
-            <div class="card"><h4>📄 Exportar a Markdown</h4><p>Endpoint <code>POST /markdown</code> y comando en el chat para generar archivos <code>.md</code> descargables con el contexto completo.</p></div>
-            <div class="card"><h4>🔑 Auto-renew GitHub token</h4><p>Durante indexaciones largas, el token de instalación se renueva automáticamente al detectar <code>401 Unauthorized</code>.</p></div>
+            <div class="card"><h4>🔐 Seguridad: API Key en endpoints</h4><p>Variable <code>INDEXER_API_KEY</code> protege todos los endpoints públicos del indexer con <code>Authorization: Bearer</code>. El webhook sigue usando HMAC-SHA256.</p></div>
+            <div class="card"><h4>🧠 Arquitectura v2.0: AST + Grafo + LlamaIndex</h4><p>Parseo AST profesional con Tree-sitter y JavaParser. Neo4j almacena el grafo de dependencias. LlamaIndex orquesta retrieval híbrido.</p></div>
+            <div class="card"><h4>🕸️ Grafo de dependencias</h4><p>Neo4j indexa relaciones tipadas: EXTENDS, IMPLEMENTS, HAS_METHOD, HAS_FIELD, CALLS, INJECTED, ANNOTATED_WITH. Endpoint <code>/graph/entity/{name}</code> para consultar jerarquías.</p></div>
+            <div class="card"><h4>🔍 Retrieval híbrido mejorado</h4><p>El filtro primero consulta <code>/search-augmented</code> (archivos completos), luego <code>/search-graph</code> (relaciones), y trae entidades del grafo si se mencionan nombres de clase. Límites aumentados: 50 vectoriales, 10 archivos, 20 resultados finales.</p></div>
+            <div class="card"><h4>🗂️ Listado de repos</h4><p>Nuevo endpoint <code>GET /repos</code> y comando <code>repos</code> en el chat para listar todos los repositorios indexados.</p></div>
+            <div class="card"><h4>📎 SQL Inline Resolver (truncado)</h4><p>SQL referenciado en Java se incrusta inline truncado a 6.000 chars. El archivo <code>.sql</code> completo sigue indexándose por separado, evitando chunks gigantes.</p></div>
+            <div class="card"><h4>📄 Markdown mejorado</h4><p>Regex más permisivo (<code>guardar como md</code>, <code>exportar a markdown</code>). Si el contenido es &lt; 8.000 chars se muestra en el chat; si es grande se genera descarga.</p></div>
+            <div class="card"><h4>🧱 Mitigación de clases monstruo</h4><p>Clases/interfaces con &gt; 12.000 chars se truncan en Qdrant. El <code>embed_text</code> limita código a 6.000 chars y relaciones a 20, evitando truncamiento del embedding.</p></div>
+            <div class="card"><h4>🔑 Auto-renew GitHub token</h4><p>Token de instalación se renueva automáticamente al detectar <code>401 Unauthorized</code> durante indexaciones largas.</p></div>
             <div class="card"><h4>🔄 Reintentos automáticos</h4><p>El embedder reintenta hasta 3 veces con backoff exponencial ante fallos de red o rate-limits de OpenRouter.</p></div>
             <div class="card"><h4>🏥 Health check real</h4><p><code>GET /health</code> verifica conectividad con Qdrant, Neo4j y JavaParser antes de reportar estado saludable.</p></div>
-            <div class="card"><h4>🔍 Endpoints de diagnóstico</h4><p><code>/debug/files-indexed</code>, <code>/debug/chunks</code>, <code>/graph/entity/{name}</code> y <code>/graph/related/{entity_id}</code> permiten inspeccionar índices y grafo.</p></div>
+            <div class="card"><h4>🔍 Endpoints de diagnóstico</h4><p><code>/debug/files-indexed</code>, <code>/debug/chunks</code>, <code>/graph/entity/{name}</code>, <code>/graph/related/{entity_id}</code> y <code>/repos</code> permiten inspeccionar índices y grafo.</p></div>
             <div class="card"><h4>⚙️ Configuración centralizada</h4><p>Módulo <code>config.py</code> centraliza variables de entorno; <code>docker-compose.yml</code> usa named volumes para persistencia.</p></div>
         </div>
     </section>
