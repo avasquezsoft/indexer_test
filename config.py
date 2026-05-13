@@ -41,3 +41,6 @@ WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
 # API Key para proteger endpoints públicos (opcional pero recomendado)
 INDEXER_API_KEY = os.environ.get("INDEXER_API_KEY", "")
+
+# Directorio base para clones locales de repos (respaldos + lectura rápida)
+CLONE_BASE_DIR = os.environ.get("CLONE_BASE_DIR", "/repos")

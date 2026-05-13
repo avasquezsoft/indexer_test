@@ -81,6 +81,7 @@ services:
     - '8001'
     volumes:
     - indexer_cache:/opt/indexer_cache
+    - repos_data:/repos
     command: |
       sh -c " apt-get update -qq && apt-get install -y git -qq && rm -rf /opt/indexer && git clone ${INDEXER_REPO_URL} /opt/indexer && pip install -r /opt/indexer/requirements.txt -q && uvicorn main:app --host 0.0.0.0 --port 8001 --app-dir /opt/indexer"
     environment:
@@ -742,3 +743,5 @@ volumes:
     name: tennis-doc-neo4j-logs
   javaparser_cache:
     name: tennis-doc-javaparser-cache
+  repos_data:
+    name: tennis-doc-repos-data

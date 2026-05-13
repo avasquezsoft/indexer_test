@@ -20,6 +20,7 @@ from config import QDRANT_COLLECTION, WEBHOOK_SECRET, VECTOR_SIZE, JAVAPARSER_UR
 import ast_parser
 import graph_store
 import rag_engine
+import repo_clone
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -190,7 +191,8 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if ref.startswith("refs/heads/") and repo_name:
             branch = ref.replace("refs/heads/", "")
-            log.info(f"Push detectado en {repo_name} @ {branch} — iniciando re-indexación")
+            log.info(f"Push detectado en {repo_name} @ {branch} — iniciando re-indexación y git pull")
+            background_tasks.add_task(repo_clone.clone_or_pull_repo, repo_name, branch)
             background_tasks.add_task(index_repo, repo_name, branch)
 
     return JSONResponse({"status": "ok"})
@@ -204,10 +206,18 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
     """
     Indexa todos los archivos de un repo (rama específica) con pipeline profesional:
     AST → Grafo (Neo4j) + Vectores (Qdrant). Corre en background.
+    También mantiene un clon local actualizado en CLONE_BASE_DIR.
     """
     try:
         owner, repo = full_repo_name.split("/", 1)
         log.info(f"Indexando {full_repo_name} @ {branch}...")
+
+        # Asegurar clon local actualizado
+        try:
+            await repo_clone.clone_or_pull_repo(full_repo_name, branch)
+            log.info("Clon local actualizado para %s @ %s", full_repo_name, branch)
+        except Exception as exc:
+            log.warning("No se pudo actualizar clon local de %s: %s", full_repo_name, exc)
 
         token = get_installation_token()
         files = get_repo_files(token, owner, repo, ref=branch)
@@ -600,7 +610,23 @@ class FetchFileRequest(BaseModel):
 
 @app.post("/fetch-file", dependencies=[Depends(verify_api_key)])
 async def fetch_file(req: FetchFileRequest):
-    """Trae el contenido crudo de un archivo específico desde GitHub."""
+    """
+    Trae el contenido crudo de un archivo específico.
+    Primero intenta leer del clon local; si no existe, fallback a GitHub API.
+    """
+    # 1) Intentar leer del clon local
+    local_content = repo_clone.read_file_from_clone(req.repo, req.file_path)
+    if local_content is not None:
+        log.info("Fetch local: %s/%s (desde clon)", req.repo, req.file_path)
+        return {
+            "repo": req.repo,
+            "branch": req.branch,
+            "file_path": req.file_path,
+            "content": local_content,
+            "source": "clone",
+        }
+
+    # 2) Fallback a GitHub API
     try:
         owner, repo_name = req.repo.split("/", 1)
     except ValueError:
@@ -624,6 +650,7 @@ async def fetch_file(req: FetchFileRequest):
         "branch": req.branch,
         "file_path": req.file_path,
         "content": content,
+        "source": "github",
     }
 
 
