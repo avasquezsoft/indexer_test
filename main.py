@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from io import BytesIO
 
-from github_client import get_installation_token, get_repo_files, get_file_content, GitHubTokenExpired
+from github_client import get_installation_token, get_repo_files, get_file_content, GitHubTokenExpired, list_repos
 from chunker import chunk_file
 from embedder import get_embedding, get_embeddings_batch
 from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks, ping_client
@@ -931,7 +931,7 @@ async def debug_chunks(repo: str, file_path: str, branch: str = "HEAD"):
 # ─────────────────────────────────────────
 
 @app.get("/repos", dependencies=[Depends(verify_api_key)])
-async def list_repos():
+async def list_indexed_repos():
     """Devuelve la lista de repos únicos indexados en Neo4j."""
     try:
         driver = graph_store.get_driver()
@@ -942,6 +942,30 @@ async def list_repos():
     except Exception as exc:
         log.error(f"Error listando repos: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/repos-available", dependencies=[Depends(verify_api_key)])
+async def list_available_repos():
+    """Lista todos los repositorios a los que la GitHub App tiene acceso vía la instalación."""
+    try:
+        token = get_installation_token()
+        raw_repos = list_repos(token)
+        repos = [
+            {
+                "full_name": r.get("full_name"),
+                "name": r.get("name"),
+                "owner": r.get("owner", {}).get("login"),
+                "default_branch": r.get("default_branch", "main"),
+                "private": r.get("private"),
+                "html_url": r.get("html_url"),
+                "description": r.get("description"),
+            }
+            for r in raw_repos
+        ]
+        return {"count": len(repos), "repos": repos}
+    except Exception as exc:
+        log.error(f"Error listando repos disponibles: {exc}")
+        raise HTTPException(status_code=502, detail=f"Error al obtener repos de GitHub: {exc}")
 
 
 @app.get("/health")
