@@ -176,24 +176,54 @@ def _verify_signature(body: bytes, signature: str) -> bool:
 async def github_webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256", "")
+    delivery = request.headers.get("X-GitHub-Delivery", "unknown")
+    event = request.headers.get("X-GitHub-Event", "unknown")
+
+    log.info(f"Webhook recibido: delivery={delivery} event={event} ip={request.client.host if request.client else 'unknown'} size={len(body)} bytes")
 
     if not _verify_signature(body, signature):
+        log.warning(f"Webhook firma inválida: delivery={delivery} event={event}")
         raise HTTPException(status_code=401, detail="Firma inválida")
 
-    event = request.headers.get("X-GitHub-Event", "")
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        log.warning(f"Webhook JSON inválido: delivery={delivery} error={exc}")
+        raise HTTPException(status_code=400, detail="Payload inválido")
 
-    # Solo procesamos push a la rama que se especificó
     if event == "push":
         repo_name = payload.get("repository", {}).get("full_name", "")
         ref = payload.get("ref", "")
-        default_branch = payload.get("repository", {}).get("default_branch", "main")
+        pusher = payload.get("pusher", {}).get("name", "unknown")
 
         if ref.startswith("refs/heads/") and repo_name:
             branch = ref.replace("refs/heads/", "")
-            log.info(f"Push detectado en {repo_name} @ {branch} — iniciando re-indexación y git pull")
+            log.info(f"Push detectado en {repo_name} @ {branch} (pusher={pusher}) — iniciando re-indexación")
             background_tasks.add_task(repo_clone.clone_or_pull_repo, repo_name, branch)
             background_tasks.add_task(index_repo, repo_name, branch)
+        else:
+            log.info(f"Push ignorado: repo={repo_name} ref={ref}")
+
+    elif event == "pull_request":
+        action = payload.get("action", "")
+        merged = payload.get("pull_request", {}).get("merged", False)
+        base_ref = payload.get("pull_request", {}).get("base", {}).get("ref", "")
+        head_ref = payload.get("pull_request", {}).get("head", {}).get("ref", "")
+        repo_name = payload.get("repository", {}).get("full_name", "")
+        pr_number = payload.get("number", "?")
+        sender = payload.get("sender", {}).get("login", "unknown")
+
+        log.info(f"Pull request event: action={action} merged={merged} repo={repo_name} pr=#{pr_number} base={base_ref} head={head_ref} sender={sender}")
+
+        if action == "closed" and merged and repo_name and base_ref:
+            log.info(f"PR mergeado detectado en {repo_name} @ {base_ref} — iniciando re-indexación")
+            background_tasks.add_task(repo_clone.clone_or_pull_repo, repo_name, base_ref)
+            background_tasks.add_task(index_repo, repo_name, base_ref)
+        else:
+            log.info(f"PR event ignorado: action={action} merged={merged}")
+
+    else:
+        log.info(f"Evento GitHub no manejado: {event}")
 
     return JSONResponse({"status": "ok"})
 
