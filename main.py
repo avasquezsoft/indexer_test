@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from io import BytesIO
 
-from github_client import get_installation_token, get_repo_files, get_file_content, GitHubTokenExpired, list_repos
+from github_client import get_installation_token, get_installation_token_for_repo, get_repo_files, get_file_content, GitHubTokenExpired, list_repos, list_all_repos
 from chunker import chunk_file
 from embedder import get_embedding, get_embeddings_batch
 from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks, ping_client
@@ -249,7 +249,7 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
         except Exception as exc:
             log.warning("No se pudo actualizar clon local de %s: %s", full_repo_name, exc)
 
-        token = get_installation_token()
+        token = get_installation_token_for_repo(owner, repo)
         files = get_repo_files(token, owner, repo, ref=branch)
         log.info(f"Encontrados {len(files)} archivos en {full_repo_name} @ {branch}")
 
@@ -662,11 +662,11 @@ async def fetch_file(req: FetchFileRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="repo debe tener formato 'org/repo'")
 
-    token = get_installation_token()
+    token = get_installation_token_for_repo(owner, repo_name)
     try:
         content = get_file_content(token, owner, repo_name, req.file_path, ref=req.branch)
     except GitHubTokenExpired:
-        token = get_installation_token()
+        token = get_installation_token_for_repo(owner, repo_name)
         content = get_file_content(token, owner, repo_name, req.file_path, ref=req.branch)
     except Exception as exc:
         log.error(f"Error fetching {req.file_path}: {exc}")
@@ -828,7 +828,7 @@ async def debug_files(repo: str, branch: str = "HEAD"):
     """Lista los archivos que serían indexados (sin indexar)."""
     try:
         owner, repo_name = repo.split("/", 1)
-        token = get_installation_token()
+        token = get_installation_token_for_repo(owner, repo_name)
         files = get_repo_files(token, owner, repo_name, ref=branch)
         return {"repo": repo, "branch": branch, "file_count": len(files), "files": [f["path"] for f in files]}
     except Exception as exc:
@@ -948,8 +948,7 @@ async def list_indexed_repos():
 async def list_available_repos():
     """Lista todos los repositorios a los que la GitHub App tiene acceso vía la instalación."""
     try:
-        token = get_installation_token()
-        raw_repos = list_repos(token)
+        raw_repos = list_all_repos()
         repos = [
             {
                 "full_name": r.get("full_name"),

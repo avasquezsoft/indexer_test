@@ -135,7 +135,7 @@ Toda la configuración pasa por **variables de entorno**. No hay archivos de con
 
 ### Variables obligatorias
 - `INDEXER_REPO_URL` — URL del repo del indexador (para clonar dentro del contenedor).
-- `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` — credenciales de la GitHub App.
+- `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` — credenciales de la GitHub App. `GITHUB_APP_INSTALLATION_ID` soporta múltiples IDs separados por coma para instalaciones en distintas organizaciones.
 - `OPENROUTER_API_BASE`, `OPENROUTER_API_KEY`, `OPENROUTER_EMBED_MODEL` — embeddings vía OpenRouter.
 - `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION` — vector DB.
 - `NEO4J_URL`, `NEO4J_USER`, `NEO4J_PASSWORD` — graph DB.
@@ -229,6 +229,7 @@ Los servicios internos se exponen entre sí por nombre de red Docker (ej: `http:
 | `POST` | `/markdown` | Genera archivo `.md` descargable |
 | `GET`  | `/health` | Health check con estado de Qdrant, Neo4j y JavaParser |
 | `GET`  | `/repos` | Lista repos únicos indexados en Neo4j |
+| `GET`  | `/repos-available` | Lista repos a los que la GitHub App tiene acceso (soporta multi-org) |
 | `GET`  | `/debug/files` | Lista archivos que serían indexados (sin indexar) |
 | `GET`  | `/debug/files-indexed` | Lista archivos ya indexados en Qdrant |
 | `GET`  | `/debug/chunks` | Muestra chunks de un archivo específico en Qdrant |

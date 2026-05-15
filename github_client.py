@@ -1,3 +1,4 @@
+import logging
 import time
 import jwt
 import httpx
@@ -5,8 +6,11 @@ import httpx
 from config import (
     GITHUB_APP_ID,
     GITHUB_APP_INSTALLATION_ID,
+    GITHUB_APP_INSTALLATION_IDS,
     GITHUB_APP_PRIVATE_KEY,
 )
+
+log = logging.getLogger(__name__)
 
 # Extensiones de archivo que indexamos — incluye código, queries, configs, planillas y recursos web
 SUPPORTED_EXTENSIONS = {
@@ -55,13 +59,14 @@ def _get_jwt_token() -> str:
     return jwt.encode(payload, private_key, algorithm="RS256")
 
 
-def get_installation_token() -> str:
-    """Obtiene un token de instalación para acceder a los repos de la org."""
+def get_installation_token(installation_id: str | None = None) -> str:
+    """Obtiene un token de instalación. Si no se pasa ID, usa el primero configurado."""
+    target_id = installation_id or GITHUB_APP_INSTALLATION_ID
     jwt_token = _get_jwt_token()
 
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         response = client.post(
-            f"https://api.github.com/app/installations/{GITHUB_APP_INSTALLATION_ID}/access_tokens",
+            f"https://api.github.com/app/installations/{target_id}/access_tokens",
             headers={
                 "Authorization": f"Bearer {jwt_token}",
                 "Accept": "application/vnd.github+json",
@@ -70,6 +75,48 @@ def get_installation_token() -> str:
         )
         response.raise_for_status()
         return response.json()["token"]
+
+
+def get_installation_token_for_repo(owner: str, repo: str) -> str:
+    """
+    Prueba todos los tokens de instalación configurados hasta encontrar uno
+    que tenga acceso al repositorio solicitado.
+    """
+    for inst_id in GITHUB_APP_INSTALLATION_IDS:
+        try:
+            token = get_installation_token(inst_id)
+            # Verificación ligera: preguntamos si el repo existe para este token
+            resp = httpx.get(
+                f"https://api.github.com/repos/{owner}/{repo}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                return token
+        except Exception as exc:
+            log.debug(f"Instalación {inst_id} no tiene acceso a {owner}/{repo}: {exc}")
+            continue
+
+    # Fallback al primer ID para mantener comportamiento anterior
+    log.warning(f"Ninguna instalación confirmó acceso a {owner}/{repo}, usando token por defecto")
+    return get_installation_token()
+
+
+def list_all_repos() -> list[dict]:
+    """Lista todos los repos de todas las instalaciones configuradas."""
+    all_repos = []
+    for inst_id in GITHUB_APP_INSTALLATION_IDS:
+        try:
+            token = get_installation_token(inst_id)
+            repos = list_repos(token)
+            all_repos.extend(repos)
+        except Exception as exc:
+            log.warning(f"No se pudieron listar repos de instalación {inst_id}: {exc}")
+    return all_repos
 
 
 def list_repos(token: str) -> list[dict]:
