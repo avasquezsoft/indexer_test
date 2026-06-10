@@ -91,3 +91,34 @@ def read_file_from_clone(repo: str, file_path: str) -> str | None:
     except Exception as exc:
         logger.warning("Error leyendo %s de %s: %s", file_path, repo, exc)
         return None
+
+
+# Extensiones que indexamos y que son relevantes para búsqueda en clon local
+_CLONE_SEARCH_EXTS = {
+    ".java", ".sql", ".xml", ".properties", ".yml", ".yaml",
+    ".json", ".html", ".js", ".ts", ".py", ".md", ".txt", ".jsp", ".jspf",
+}
+
+_IGNORED_DIRS = {".git", "node_modules", "__pycache__", "target", "build", "dist", ".next", "coverage", "vendor"}
+
+
+def list_files_in_clone(repo: str) -> list[str]:
+    """
+    Lista todos los archivos del clon local que tengan extensiones soportadas.
+    Devuelve paths relativos al root del repo. Si no está clonado, devuelve [].
+    """
+    path = _get_clone_path(repo)
+    if not os.path.isdir(path):
+        return []
+
+    files = []
+    for root, dirs, fnames in os.walk(path):
+        # Filtrar directorios ignorados in-place
+        dirs[:] = [d for d in dirs if d not in _IGNORED_DIRS]
+        for fname in fnames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in _CLONE_SEARCH_EXTS:
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, path).replace("\\", "/")
+                files.append(rel)
+    return files

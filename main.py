@@ -832,6 +832,71 @@ async def generate_markdown(req: MarkdownRequest):
 
 
 # ─────────────────────────────────────────
+# Búsqueda en clon local (fallback cuando falta contexto)
+# ─────────────────────────────────────────
+
+class SearchCloneRequest(BaseModel):
+    repo: str
+    branch: str = "HEAD"
+    keywords: list[str]
+    max_files: int = 20
+    max_chars_per_file: int = 15000
+
+
+@app.post("/search-clone", dependencies=[Depends(verify_api_key)])
+async def search_clone(req: SearchCloneRequest):
+    """
+    Busca archivos en el clon local que contengan alguna de las keywords.
+    Útil cuando la búsqueda vectorial/grafo no trae suficiente contexto.
+    """
+    clone_path = repo_clone._get_clone_path(req.repo)
+    if not os.path.isdir(clone_path):
+        log.warning("Clon local no encontrado para %s", req.repo)
+        return {"results": []}
+
+    keywords_lower = [k.lower() for k in req.keywords if k]
+    if not keywords_lower:
+        return {"results": []}
+
+    matched = 0
+    results = []
+
+    for root, dirs, fnames in os.walk(clone_path):
+        dirs[:] = [d for d in dirs if d not in repo_clone._IGNORED_DIRS]
+        for fname in fnames:
+            if matched >= req.max_files:
+                break
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in repo_clone._CLONE_SEARCH_EXTS:
+                continue
+            fpath = os.path.join(root, fname)
+            rel_path = os.path.relpath(fpath, clone_path).replace("\\", "/")
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    if any(kw in content.lower() for kw in keywords_lower):
+                        if len(content) > req.max_chars_per_file:
+                            content = (
+                                content[:req.max_chars_per_file]
+                                + f"\n\n-- ... archivo truncado ({len(content)} chars originales) ... --\n"
+                            )
+                        results.append({
+                            "file_path": rel_path,
+                            "content": content,
+                            "repo": req.repo,
+                            "branch": req.branch,
+                        })
+                        matched += 1
+            except Exception:
+                continue
+        if matched >= req.max_files:
+            break
+
+    log.info("Búsqueda en clon para %s: %d archivos encontrados (keywords=%s)", req.repo, len(results), keywords_lower)
+    return {"results": results}
+
+
+# ─────────────────────────────────────────
 # Endpoints de diagnóstico
 # ─────────────────────────────────────────
 

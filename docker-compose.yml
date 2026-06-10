@@ -403,6 +403,24 @@ configs:
                       except Exception as ce:
                           print(f"[TennisDoc RAG] Error buscando clase {class_name}: {ce}")
       
+              # Fallback: si el contexto recuperado es escaso, buscar en el clon local por keywords
+              total_text = " ".join(r.get("text", "") for r in all_results)
+              if len(all_results) < 6 or len(total_text) < 4000:
+                  keywords = self._extract_keywords(query)
+                  if keywords:
+                      print(f"[TennisDoc RAG] Contexto escaso, activando fallback clone con keywords={keywords}")
+                      clone_results = self._fetch_clone_fallback(repo, branch, keywords)
+                      for cr in clone_results:
+                          _add_result({
+                              "score": 0.7,
+                              "repo": repo,
+                              "branch": branch or self.valves.default_branch,
+                              "file_path": cr.get("file_path", ""),
+                              "language": "java",
+                              "text": cr.get("content", ""),
+                              "source": "clone_keyword",
+                          }, "clone")
+      
               return all_results
       
           def inlet(self, body: dict, user: dict = None) -> dict:
@@ -685,6 +703,64 @@ configs:
                       f"[Fragmento {i}] {' | '.join(meta_parts)}\n```\n{text}\n```"
                   )
               return "\n\n---\n\n".join(parts)
+      
+          def _extract_keywords(self, query: str) -> list[str]:
+              """Extrae palabras clave técnicas de la query para búsqueda en clon local."""
+              keywords: set[str] = set()
+              # Identificadores en CamelCase / PascalCase
+              for m in re.findall(r"\b[A-Z][a-zA-Z0-9]*\b", query):
+                  if len(m) > 2:
+                      keywords.add(m)
+              # Palabras técnicas largas (evitar stopwords)
+              _STOPWORDS = {
+                  "este", "esta", "estos", "estas", "ese", "esa", "esos", "esas", "aquel", "aquella",
+                  "aquellos", "aquellas", "de", "del", "al", "el", "la", "los", "las", "un", "una",
+                  "unos", "unas", "y", "o", "que", "en", "con", "por", "para", "como", "es", "son",
+                  "lo", "le", "me", "te", "se", "si", "no", "mas", "más", "pero", "sino", "todo",
+                  "toda", "todos", "todas", "aqui", "aquí", "ahí", "allí", "donde", "cuando", "quien",
+                  "cual", "cuyo", "muy", "tan", "tanto", "cada", "alguno", "alguna", "algunos", "algunas",
+                  "ninguno", "ninguna", "mismo", "misma", "mismos", "mismas", "tal", "tales", "otro",
+                  "otra", "otros", "otras", "cualquiera", "demas", "demás", "poco", "poca", "pocos",
+                  "pocas", "mucho", "mucha", "muchos", "muchas", "varios", "varias", "bastante", "hace",
+                  "hecho", "haber", "tener", "tiene", "tenido", "ser", "estar", "estoy", "está", "estan",
+                  "están", "era", "eran", "fue", "fueron", "sea", "sean", "sido", "siendo", "habiendo",
+                  "teniendo", "haciendo", "dando", "viendo", "poder", "puede", "pueden", "podria",
+                  "podría", "podrian", "podrían", "debe", "deben", "debiera", "debieran", "deberia",
+                  "debería", "deberian", "deberían", "decir", "diciendo", "dicho", "ver", "viendo",
+                  "visto", "dar", "dando", "dado", "ir", "yendo", "ido", "venir", "viniendo", "venido",
+                  "querer", "queriendo", "querido", "saber", "sabiendo", "sabido", "pensar", "pensando",
+                  "pensado", "generame", "dame", "hazme", "mostrame", "creame", "descargame", "exportame",
+                  "guardame", "preparame", "armame", "haz", "dame", "muestra", "genera", "crea", "descarga",
+                  "exporta", "guarda", "prepara", "arma", "markdown", "archivo", "formato", "pdf",
+              }
+              for m in re.findall(r"\b[a-zA-Záéíóúñ]{4,}\b", query):
+                  wl = m.lower()
+                  if wl not in _STOPWORDS and not wl.endswith(("ando", "iendo", "ado", "ido", "ando", "iendo")):
+                      keywords.add(m)
+              return list(keywords)[:12]
+      
+          def _fetch_clone_fallback(self, repo: str | None, branch: str | None, keywords: list[str]) -> list[dict]:
+              """Llama al endpoint /search-clone del indexer para traer archivos del clon local."""
+              if not repo or not keywords:
+                  return []
+              try:
+                  resp = requests.post(
+                      f"{self.valves.indexer_url}/search-clone",
+                      json={
+                          "repo": repo,
+                          "branch": branch or self.valves.default_branch,
+                          "keywords": keywords,
+                          "max_files": 15,
+                          "max_chars_per_file": 12000,
+                      },
+                      headers=self._headers(),
+                      timeout=35,
+                  )
+                  resp.raise_for_status()
+                  return resp.json().get("results", [])
+              except Exception as e:
+                  print(f"[TennisDoc RAG] Error en fallback clone: {e}")
+                  return []
 
   litellm_config:
     content: |
