@@ -46,3 +46,12 @@ INDEXER_API_KEY = os.environ.get("INDEXER_API_KEY", "")
 
 # Directorio base para clones locales de repos (respaldos + lectura rápida)
 CLONE_BASE_DIR = os.environ.get("CLONE_BASE_DIR", "/repos")
+
+# ─────────────────────────────────────────
+# Notificaciones por email (opcional)
+# ─────────────────────────────────────────
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_USERNAME = os.environ.get("EMAIL_USERNAME", "")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINATARIO", "")

@@ -238,6 +238,12 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
     AST → Grafo (Neo4j) + Vectores (Qdrant). Corre en background.
     También mantiene un clon local actualizado en CLONE_BASE_DIR.
     """
+    total_entities = 0
+    total_chunks = 0
+    total_files = 0
+    success = False
+    details = ""
+
     try:
         owner, repo = full_repo_name.split("/", 1)
         log.info(f"Indexando {full_repo_name} @ {branch}...")
@@ -267,9 +273,6 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
         sql_files_map = {f["path"]: f for f in files if f["path"].lower().endswith(".sql")}
         log.info(f"Archivos SQL detectados en el repo: {len(sql_files_map)}")
 
-        total_entities = 0
-        total_chunks = 0
-        total_files = 0
         all_entities: list = []
         all_chunks: list = []
 
@@ -343,9 +346,18 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
             total_chunks += len(all_chunks)
 
         log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_entities} entidades, {total_chunks} chunks guardados")
+        success = True
+        details = f"Archivos procesados: {total_files}\nEntidades: {total_entities}\nChunks: {total_chunks}"
 
     except Exception as e:
         log.error(f"Error indexando {full_repo_name} @ {branch}: {e}")
+        details = str(e)
+    finally:
+        try:
+            from email_notifier import send_index_notification
+            send_index_notification(full_repo_name, branch, success, details)
+        except Exception as ne:
+            log.error("Error al enviar notificación de indexación: %s", ne)
 
 
 def _detect_language_from_path(file_path: str) -> str | None:
