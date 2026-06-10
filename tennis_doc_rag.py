@@ -90,6 +90,164 @@ class Filter:
             return f"{query} {' '.join(enrichment)}"
         return query
 
+    def _fetch_context(self, repo: str | None, branch: str | None, query: str) -> list[dict]:
+        """Ejecuta el pipeline completo de búsqueda (vectorial + grafo + entidades)."""
+        all_results: list[dict] = []
+        seen_keys: set = set()
+
+        def _add_result(r: dict, tag: str = ""):
+            key = (r.get("file_path"), r.get("text", "")[:120])
+            if key in seen_keys:
+                for existing in all_results:
+                    if (existing.get("file_path"), existing.get("text", "")[:120]) == key:
+                        existing["score"] = max(existing.get("score", 0), r.get("score", 0))
+                        if tag and tag not in str(existing.get("source", "")):
+                            existing["source"] = f"{existing.get('source', 'unknown')}+{tag}"
+                        break
+                return
+            seen_keys.add(key)
+            if tag:
+                r["source"] = f"{r.get('source', 'unknown')}+{tag}"
+            all_results.append(r)
+
+        search_query = self._enrich_query(query)
+
+        # 1) Búsqueda aumentada: archivos completos
+        try:
+            payload = {
+                "query": search_query,
+                "repo": repo,
+                "branch": branch,
+                "max_files": 10,
+                "vector_limit": 50,
+            }
+            resp = requests.post(
+                f"{self.valves.indexer_url}/search-augmented",
+                json={k: v for k, v in payload.items() if v is not None},
+                headers=self._headers(),
+                timeout=25,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for r in data.get("results", []):
+                _add_result(r, "augmented")
+            print(f"[TennisDoc RAG] Búsqueda aumentada: {len(data.get('results', []))} chunks de {data.get('files_fetched', 0)} archivos")
+        except Exception as e:
+            print(f"[TennisDoc RAG] Error en /search-augmented: {e}")
+
+        # 2) Búsqueda grafo: entidades y vecinos
+        try:
+            payload = {
+                "query": search_query,
+                "repo": repo,
+                "branch": branch,
+                "limit": self.valves.limit,
+                "graph_depth": 2,
+            }
+            resp = requests.post(
+                f"{self.valves.indexer_url}/search-graph",
+                json={k: v for k, v in payload.items() if v is not None},
+                headers=self._headers(),
+                timeout=25,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for r in data.get("results", []):
+                _add_result(r, "graph")
+            print(f"[TennisDoc RAG] Búsqueda grafo: {len(data.get('results', []))} resultados")
+        except Exception as e:
+            print(f"[TennisDoc RAG] Error en /search-graph: {e}")
+
+        # 3) Si la query menciona nombres de clase, traer la entidad del grafo y sus relaciones directas
+        class_names = _CLASS_NAME_RE.findall(query)
+        if class_names and repo:
+            for class_name in class_names[:3]:
+                try:
+                    resp = requests.get(
+                        f"{self.valves.indexer_url}/graph/entity/{class_name}",
+                        params={"repo": repo, "branch": branch or self.valves.default_branch},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        ent = resp.json()
+                        if ent.get("code"):
+                            _add_result({
+                                "score": 1.0,
+                                "repo": repo,
+                                "branch": branch or self.valves.default_branch,
+                                "file_path": ent.get("file_path", ""),
+                                "language": "java",
+                                "text": ent["code"],
+                                "ast_name": ent.get("name", ""),
+                                "ast_type": ent.get("type", ""),
+                                "ast_signature": ent.get("signature", ""),
+                                "source": "graph_entity",
+                            }, "entity")
+                            print(f"[TennisDoc RAG] Entidad grafo añadida: {class_name}")
+                        for rel in ent.get("relations", [])[:5]:
+                            target_name = rel.get("target_name")
+                            if not target_name:
+                                continue
+                            try:
+                                tresp = requests.get(
+                                    f"{self.valves.indexer_url}/graph/entity/{target_name}",
+                                    params={"repo": repo, "branch": branch or self.valves.default_branch},
+                                    timeout=10,
+                                )
+                                if tresp.status_code == 200:
+                                    tent = tresp.json()
+                                    if tent.get("code"):
+                                        _add_result({
+                                            "score": 0.95,
+                                            "repo": repo,
+                                            "branch": branch or self.valves.default_branch,
+                                            "file_path": tent.get("file_path", ""),
+                                            "language": "java",
+                                            "text": tent["code"],
+                                            "ast_name": tent.get("name", ""),
+                                            "ast_type": tent.get("type", ""),
+                                            "ast_signature": tent.get("signature", ""),
+                                            "source": "graph_relation",
+                                        }, "relation")
+                            except Exception as te:
+                                print(f"[TennisDoc RAG] Error trayendo relación {target_name}: {te}")
+                    else:
+                        # Fallback: buscar archivo por nombre en el índice y hacer fetch
+                        resp = requests.get(
+                            f"{self.valves.indexer_url}/debug/files-indexed",
+                            params={"repo": repo, "branch": branch or self.valves.default_branch},
+                            timeout=10,
+                        )
+                        resp.raise_for_status()
+                        files = resp.json().get("files", [])
+                        matches = [f for f in files if class_name in f]
+                        for file_path in matches[:2]:
+                            try:
+                                fetch_resp = requests.post(
+                                    f"{self.valves.indexer_url}/fetch-file",
+                                    json={"repo": repo, "file_path": file_path, "branch": branch or self.valves.default_branch},
+                                    headers=self._headers(),
+                                    timeout=10,
+                                )
+                                fetch_resp.raise_for_status()
+                                fdata = fetch_resp.json()
+                                _add_result({
+                                    "score": 1.0,
+                                    "repo": repo,
+                                    "branch": branch or self.valves.default_branch,
+                                    "file_path": file_path,
+                                    "language": "java",
+                                    "text": fdata.get("content", ""),
+                                    "source": "fetch",
+                                }, "fetch")
+                                print(f"[TennisDoc RAG] Fetch directo: {file_path}")
+                            except Exception as fe:
+                                print(f"[TennisDoc RAG] Error fetch {file_path}: {fe}")
+                except Exception as ce:
+                    print(f"[TennisDoc RAG] Error buscando clase {class_name}: {ce}")
+
+        return all_results
+
     def inlet(self, body: dict, user: dict = None) -> dict:
         """Se ejecuta ANTES de enviar los mensajes al LLM."""
         try:
@@ -148,162 +306,9 @@ class Filter:
 
             # ── RAG automático: detectar repo/rama y buscar contexto ──
             repo, branch = self._extract_repo_branch(query)
-            search_query = self._enrich_query(query)
-            print(f"[TennisDoc RAG] Buscando contexto | repo={repo} | branch={branch} | enriched_query={search_query[:100]}...")
+            print(f"[TennisDoc RAG] Buscando contexto | repo={repo} | branch={branch} | enriched_query={self._enrich_query(query)[:100]}...")
 
-            all_results = []
-            seen_keys = set()
-
-            def _add_result(r: dict, tag: str = ""):
-                key = (r.get("file_path"), r.get("text", "")[:120])
-                if key in seen_keys:
-                    for existing in all_results:
-                        if (existing.get("file_path"), existing.get("text", "")[:120]) == key:
-                            existing["score"] = max(existing.get("score", 0), r.get("score", 0))
-                            if tag and tag not in str(existing.get("source", "")):
-                                existing["source"] = f"{existing.get('source', 'unknown')}+{tag}"
-                            break
-                    return
-                seen_keys.add(key)
-                if tag:
-                    r["source"] = f"{r.get('source', 'unknown')}+{tag}"
-                all_results.append(r)
-
-            # 1) Búsqueda aumentada: archivos completos (todos los chunks de los top files)
-            try:
-                payload = {
-                    "query": search_query,
-                    "repo": repo,
-                    "branch": branch,
-                    "max_files": 10,
-                    "vector_limit": 50,
-                }
-                resp = requests.post(
-                    f"{self.valves.indexer_url}/search-augmented",
-                    json={k: v for k, v in payload.items() if v is not None},
-                    headers=self._headers(),
-                    timeout=25,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                for r in data.get("results", []):
-                    _add_result(r, "augmented")
-                print(f"[TennisDoc RAG] Búsqueda aumentada: {len(data.get('results', []))} chunks de {data.get('files_fetched', 0)} archivos")
-            except Exception as e:
-                print(f"[TennisDoc RAG] Error en /search-augmented: {e}")
-
-            # 2) Búsqueda grafo: entidades y vecinos
-            try:
-                payload = {
-                    "query": search_query,
-                    "repo": repo,
-                    "branch": branch,
-                    "limit": self.valves.limit,
-                    "graph_depth": 2,
-                }
-                resp = requests.post(
-                    f"{self.valves.indexer_url}/search-graph",
-                    json={k: v for k, v in payload.items() if v is not None},
-                    headers=self._headers(),
-                    timeout=25,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                for r in data.get("results", []):
-                    _add_result(r, "graph")
-                print(f"[TennisDoc RAG] Búsqueda grafo: {len(data.get('results', []))} resultados")
-            except Exception as e:
-                print(f"[TennisDoc RAG] Error en /search-graph: {e}")
-
-            # 3) Si la query menciona nombres de clase, traer la entidad del grafo y sus relaciones directas
-            class_names = _CLASS_NAME_RE.findall(query)
-            if class_names and repo:
-                for class_name in class_names[:3]:
-                    try:
-                        resp = requests.get(
-                            f"{self.valves.indexer_url}/graph/entity/{class_name}",
-                            params={"repo": repo, "branch": branch or self.valves.default_branch},
-                            timeout=10,
-                        )
-                        if resp.status_code == 200:
-                            ent = resp.json()
-                            if ent.get("code"):
-                                _add_result({
-                                    "score": 1.0,
-                                    "repo": repo,
-                                    "branch": branch or self.valves.default_branch,
-                                    "file_path": ent.get("file_path", ""),
-                                    "language": "java",
-                                    "text": ent["code"],
-                                    "ast_name": ent.get("name", ""),
-                                    "ast_type": ent.get("type", ""),
-                                    "ast_signature": ent.get("signature", ""),
-                                    "source": "graph_entity",
-                                }, "entity")
-                                print(f"[TennisDoc RAG] Entidad grafo añadida: {class_name}")
-                            for rel in ent.get("relations", [])[:5]:
-                                target_name = rel.get("target_name")
-                                if not target_name:
-                                    continue
-                                try:
-                                    tresp = requests.get(
-                                        f"{self.valves.indexer_url}/graph/entity/{target_name}",
-                                        params={"repo": repo, "branch": branch or self.valves.default_branch},
-                                        timeout=10,
-                                    )
-                                    if tresp.status_code == 200:
-                                        tent = tresp.json()
-                                        if tent.get("code"):
-                                            _add_result({
-                                                "score": 0.95,
-                                                "repo": repo,
-                                                "branch": branch or self.valves.default_branch,
-                                                "file_path": tent.get("file_path", ""),
-                                                "language": "java",
-                                                "text": tent["code"],
-                                                "ast_name": tent.get("name", ""),
-                                                "ast_type": tent.get("type", ""),
-                                                "ast_signature": tent.get("signature", ""),
-                                                "source": "graph_relation",
-                                            }, "relation")
-                                except Exception as te:
-                                    print(f"[TennisDoc RAG] Error trayendo relación {target_name}: {te}")
-                        else:
-                            # Fallback: buscar archivo por nombre en el índice y hacer fetch
-                            resp = requests.get(
-                                f"{self.valves.indexer_url}/debug/files-indexed",
-                                params={"repo": repo, "branch": branch or self.valves.default_branch},
-                                timeout=10,
-                            )
-                            resp.raise_for_status()
-                            files = resp.json().get("files", [])
-                            matches = [f for f in files if class_name in f]
-                            for file_path in matches[:2]:
-                                try:
-                                    fetch_resp = requests.post(
-                                        f"{self.valves.indexer_url}/fetch-file",
-                                        json={"repo": repo, "file_path": file_path, "branch": branch or self.valves.default_branch},
-                                        headers=self._headers(),
-                                        timeout=10,
-                                    )
-                                    fetch_resp.raise_for_status()
-                                    fdata = fetch_resp.json()
-                                    _add_result({
-                                        "score": 1.0,
-                                        "repo": repo,
-                                        "branch": branch or self.valves.default_branch,
-                                        "file_path": file_path,
-                                        "language": "java",
-                                        "text": fdata.get("content", ""),
-                                        "source": "fetch",
-                                    }, "fetch")
-                                    print(f"[TennisDoc RAG] Fetch directo: {file_path}")
-                                except Exception as fe:
-                                    print(f"[TennisDoc RAG] Error fetch {file_path}: {fe}")
-                    except Exception as ce:
-                        print(f"[TennisDoc RAG] Error buscando clase {class_name}: {ce}")
-
-            deduped = all_results
+            deduped = self._fetch_context(repo, branch, query)
 
             if deduped:
                 context = self._build_context(deduped)
@@ -364,88 +369,44 @@ class Filter:
         return body
 
     def _generate_markdown(self, body: dict, repo: str | None, branch: str | None, query: str) -> dict:
-        """Busca chunks, arma un markdown estructurado y lo ofrece como descarga."""
+        """Modo Markdown: recupera contexto y pide al LLM que responda en formato Markdown."""
         try:
-            search_query = self._enrich_query(query)
-            print(f"[TennisDoc RAG] Generando MD | repo={repo} | branch={branch}")
+            print(f"[TennisDoc RAG] Modo Markdown | repo={repo} | branch={branch}")
+            deduped = self._fetch_context(repo, branch, query)
 
-            payload = {"query": search_query, "limit": self.valves.limit}
-            if repo:
-                payload["repo"] = repo
-            if branch:
-                payload["branch"] = branch
-
-            resp = requests.post(
-                f"{self.valves.indexer_url}/search-augmented",
-                json=payload,
-                headers=self._headers(),
-                timeout=20,
-            )
-            resp.raise_for_status()
-            results = resp.json().get("results", [])
-            print(f"[TennisDoc RAG] Chunks para MD: {len(results)}")
-
-            if not results:
-                body["messages"][-1]["content"] = "No encontré chunks para generar el archivo Markdown. Intenta con una pregunta más específica o verifica que el repo esté indexado."
+            if not deduped:
+                body["messages"][-1]["content"] = (
+                    "No encontré chunks para responder. Intenta con una pregunta más específica o verifica que el repo esté indexado."
+                )
                 return body
 
-            # Armar markdown
-            lines = [f"# Contexto de código: {repo or 'Todos los repos'}", ""]
-            if branch:
-                lines.append(f"**Rama:** {branch}")
-                lines.append("")
-            lines.append(f"**Query original:** {query}")
-            lines.append("")
-            lines.append("---")
-            lines.append("")
+            context = self._build_context(deduped)
+            scope = f"Repo: {repo} | Rama: {branch}" if repo else f"Todas las ramas (filtro: {branch})"
 
-            for i, r in enumerate(results, 1):
-                score = r.get("score", 0)
-                file_path = r.get("file_path", "unknown")
-                language = r.get("language", "text")
-                text = r.get("text", "")
-                lines.append(f"## Fragmento {i} (score: {score:.3f})")
-                lines.append(f"- **Archivo:** `{file_path}`")
-                lines.append(f"- **Lenguaje:** {language}")
-                lines.append("")
-                lines.append(f"```{language}")
-                lines.append(text)
-                lines.append("```")
-                lines.append("")
-                lines.append("---")
-                lines.append("")
+            system_msg = {
+                "role": "system",
+                "content": (
+                    "Eres un asistente técnico especializado en el código fuente de la organización. "
+                    f"Ámbito de búsqueda: {scope}. "
+                    "Responde ÚNICAMENTE basándote en el siguiente contexto del código. "
+                    "El contexto incluye relaciones de grafo (herencia, implementaciones, métodos, campos, inyecciones de dependencias). "
+                    "IMPORTANTE: los fragmentos pueden contener el código Java junto con las queries SQL referenciadas (marcadas como '-- Referenced SQL:'). "
+                    "Busca en TODOS los fragmentos: firmas de métodos, implementaciones, queries SQL/JPQL, lógica de negocio y mapeo de entidades. "
+                    "Si una clase extiende o implementa otra, menciona la jerarquía completa. "
+                    "FORMATO REQUERIDO: responde ÚNICAMENTE en Markdown bien estructurado. "
+                    "Usa tablas para listar entidades, bullets para detalles y bloques de código para snippets. "
+                    "No añadas introducciones como 'A continuación...', ve directo al contenido. "
+                    "Si la respuesta no está en el contexto, indica que no tienes información suficiente.\n\n"
+                    f"{context}"
+                ),
+            }
 
-            md_content = "\n".join(lines)
-            title = f"Contexto_{repo.replace('/', '_')}" if repo else "Contexto_Codigo"
-
-            resp = requests.post(
-                f"{self.valves.indexer_url}/markdown",
-                json={"title": title, "content": md_content, "repo": repo, "branch": branch},
-                headers=self._headers(),
-                timeout=30,
-            )
-            resp.raise_for_status()
-            md_bytes = resp.content
-            md_b64 = base64.b64encode(md_bytes).decode("utf-8")
-
-            download_link = f'<a href="data:text/markdown;base64,{md_b64}" download="{title}.md">📄 Descargar Markdown</a>'
-
-            # Si el markdown no es enorme, también mostrarlo como texto copiable
-            if len(md_content) < 8000:
-                body["messages"][-1]["content"] = (
-                    f"He generado un archivo Markdown con {len(results)} fragmentos. "
-                    f"Podés descargarlo o copiarlo directamente:\n\n{download_link}\n\n"
-                    f"---\n\n```markdown\n{md_content}\n```"
-                )
-            else:
-                body["messages"][-1]["content"] = (
-                    f"He generado un archivo Markdown con {len(results)} fragmentos ({len(md_content)} chars). "
-                    f"El contenido es muy grande para mostrarlo aquí, descargalo:\n\n{download_link}"
-                )
-            print(f"[TennisDoc RAG] Markdown generado: {title}.md ({len(md_bytes)} bytes)")
+            messages = body.get("messages", [])
+            messages.insert(-1, system_msg)
+            body["messages"] = messages
+            print(f"[TennisDoc RAG] Contexto Markdown inyectado: {len(deduped)} fragmentos")
         except Exception as e:
-            body["messages"][-1]["content"] = f"[Sistema] Error generando Markdown: {e}"
-            print(f"[TennisDoc RAG] ERROR generando Markdown: {e}")
+            print(f"[TennisDoc RAG] ERROR en modo Markdown: {e}")
         return body
 
     def _generate_pdf(self, body: dict, repo: str, branch: str) -> dict:
