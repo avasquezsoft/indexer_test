@@ -19,10 +19,13 @@ _REPO_RE = re.compile(r"[\w.-]+/[\w.-]+")
 # Regex para detectar rama explícita: "rama X" o "branch X"
 _BRANCH_RE = re.compile(r"(?:rama|branch)\s+(\S+)", re.IGNORECASE)
 # Regex para detectar solicitud de PDF
-_PDF_RE = re.compile(r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?)\s+(?:un\s+)?pdf", re.IGNORECASE)
+_PDF_RE = re.compile(
+    r"(?:\b(?:genera?(?:r|me)?|crea?(?:r|me)?|descarga?(?:r|me)?|exporta?(?:r|me)?|guarda?(?:r|me)?|sacar|dame|mostra?(?:r|me)?|hazme|preparame|armame)\b).*?\bpdf\b",
+    re.IGNORECASE,
+)
 # Regex para detectar solicitud de Markdown / archivo MD
 _MD_RE = re.compile(
-    r"(?:genera?r?|crea?r?|descarga?r?|exporta?r?|guarda?r?|sacar|dame|mostra?r?)\s+(?:un\s+)?(?:archivo\s+)?(?:markdown|md|\.md)",
+    r"(?:\b(?:genera?(?:r|me)?|crea?(?:r|me)?|descarga?(?:r|me)?|exporta?(?:r|me)?|guarda?(?:r|me)?|sacar|dame|mostra?(?:r|me)?|hazme|preparame|armame)\b).*?\b(?:markdown|md|\.md)\b",
     re.IGNORECASE,
 )
 # Regex para comando especial "grafo NombreClase"
