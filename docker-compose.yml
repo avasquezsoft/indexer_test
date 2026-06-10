@@ -115,21 +115,35 @@ services:
     container_name: tennis-doc
     restart: unless-stopped
     ports:
-    - 3001:8080
+    - 3502:8080
     volumes:
     - webui_data:/app/backend/data
     configs:
     - source: tennis_doc_rag
       target: /app/backend/data/functions/tennis_doc_rag.py
     environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       OPENAI_API_BASE_URL: http://litellm:4000/v1
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
       WEBUI_URL: ${WEBUI_URL}
       DEFAULT_USER_ROLE: user
+      WEBUI_DEFAULT_LOCALE: es-ES
+      DEFAULT_LOCALE: es-ES
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: 1
+      CORS_ALLOW_ORIGIN: http://172.18.20.132:3502
+      ENABLE_WEBSOCKET_SUPPORT: true
+      ENABLE_PERSISTENT_CONFIG: true
       ENABLE_SIGNUP: ${ENABLE_SIGNUP}
       WEBUI_NAME: ${WEBUI_NAME}
       INDEXER_API_KEY: ${INDEXER_API_KEY}
+      RAG_OPENAI_API_BASE_URL: http://litellm:4000/v1
+      RAG_OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_EMBEDDING_MODEL: embedding
     depends_on:
     - litellm
     - postgres
@@ -717,6 +731,13 @@ configs:
         - model_name: chat-fallback
           litellm_params:
             model: deepseek/deepseek-v4-flash
+            api_base: "https://openrouter.ai/api/v1"
+            api_key: os.environ/OPENROUTER_API_KEY
+        
+        # Embeddings
+        - model_name: embedding
+          litellm_params:
+            model: openrouter/qwen/qwen3-embedding-8b
             api_base: "https://openrouter.ai/api/v1"
             api_key: os.environ/OPENROUTER_API_KEY
 
