@@ -597,7 +597,7 @@ class Filter:
                     "max_chars_per_file": 12000,
                 },
                 headers=self._headers(),
-                timeout=35,
+                timeout=60,
             )
             resp.raise_for_status()
             return resp.json().get("results", [])

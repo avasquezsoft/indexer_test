@@ -83,7 +83,7 @@ services:
     - indexer_cache:/opt/indexer_cache
     - repos_data:/repos
     command: |
-      sh -c " apt-get update -qq && apt-get install -y git -qq && rm -rf /opt/indexer && git clone ${INDEXER_REPO_URL} /opt/indexer && pip install -r /opt/indexer/requirements.txt -q && uvicorn main:app --host 0.0.0.0 --port 8001 --app-dir /opt/indexer"
+      sh -c " apt-get update -qq && apt-get install -y git -qq && rm -rf /opt/indexer && git clone ${INDEXER_REPO_URL} /opt/indexer && pip install -r /opt/indexer/requirements.txt -q && uvicorn main:app --host 0.0.0.0 --port 8001 --app-dir /opt/indexer --workers 3"
     environment:
       INDEXER_REPO_URL: ${INDEXER_REPO_URL}
       GITHUB_APP_ID: ${GITHUB_APP_ID}
@@ -754,7 +754,7 @@ configs:
                           "max_chars_per_file": 12000,
                       },
                       headers=self._headers(),
-                      timeout=35,
+                      timeout=60,
                   )
                   resp.raise_for_status()
                   return resp.json().get("results", [])

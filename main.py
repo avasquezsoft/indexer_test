@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import hashlib
 import logging
@@ -173,7 +174,7 @@ def _verify_signature(body: bytes, signature: str) -> bool:
 
 
 @app.post("/webhook")
-async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+async def github_webhook(request: Request):
     body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256", "")
     delivery = request.headers.get("X-GitHub-Delivery", "unknown")
@@ -199,8 +200,7 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
         if ref.startswith("refs/heads/") and repo_name:
             branch = ref.replace("refs/heads/", "")
             log.info(f"Push detectado en {repo_name} @ {branch} (pusher={pusher}) — iniciando re-indexación")
-            background_tasks.add_task(repo_clone.clone_or_pull_repo, repo_name, branch)
-            background_tasks.add_task(index_repo, repo_name, branch)
+            asyncio.create_task(asyncio.to_thread(_run_index_sync, repo_name, branch))
         else:
             log.info(f"Push ignorado: repo={repo_name} ref={ref}")
 
@@ -217,8 +217,7 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if action == "closed" and merged and repo_name and base_ref:
             log.info(f"PR mergeado detectado en {repo_name} @ {base_ref} — iniciando re-indexación")
-            background_tasks.add_task(repo_clone.clone_or_pull_repo, repo_name, base_ref)
-            background_tasks.add_task(index_repo, repo_name, base_ref)
+            asyncio.create_task(asyncio.to_thread(_run_index_sync, repo_name, base_ref))
         else:
             log.info(f"PR event ignorado: action={action} merged={merged}")
 
@@ -231,6 +230,11 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 # ─────────────────────────────────────────
 # Indexación de un repo completo
 # ─────────────────────────────────────────
+
+def _run_index_sync(full_repo_name: str, branch: str = "HEAD"):
+    """Wrapper síncrono para ejecutar index_repo en un thread separado."""
+    asyncio.run(index_repo(full_repo_name, branch))
+
 
 async def index_repo(full_repo_name: str, branch: str = "HEAD"):
     """
@@ -435,9 +439,9 @@ class IndexRequest(BaseModel):
 
 
 @app.post("/index", dependencies=[Depends(verify_api_key)])
-async def manual_index(req: IndexRequest, background_tasks: BackgroundTasks):
-    """Dispara indexación manual de un repo (rama opcional)."""
-    background_tasks.add_task(index_repo, req.repo, req.branch)
+async def manual_index(req: IndexRequest):
+    """Dispara indexación manual de un repo (rama opcional) en un thread aparte."""
+    asyncio.create_task(asyncio.to_thread(_run_index_sync, req.repo, req.branch))
     return {"status": "indexación iniciada", "repo": req.repo, "branch": req.branch}
 
 
