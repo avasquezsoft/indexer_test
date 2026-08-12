@@ -1,7 +1,12 @@
 """
-rag_engine.py — Motor de retrieval híbrido: vectorial (Qdrant) + grafo (Neo4j).
+rag_engine.py — Motor de retrieval híbrido para código.
 
-Implementación propia sin dependencias externas pesadas (sin LlamaIndex).
+Combina:
+1. Qdrant       → búsqueda semántica
+2. Neo4j        → relaciones y dependencias
+3. Exact match  → búsqueda de entidades/clases
+4. Reranking    → combinación de señales
+5. Deduplicación → evita enviar el mismo código varias veces
 """
 
 import logging
@@ -10,13 +15,19 @@ from dataclasses import dataclass, field
 
 import embedder
 import graph_store
-from qdrant_store import get_client, search_chunks, QDRANT_COLLECTION
+
+from qdrant_store import (
+    get_client,
+    search_chunks,
+    QDRANT_COLLECTION,
+)
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════════════
-# Modelos simples (reemplazan llama-index schema)
-# ═══════════════════════════════════════════════════════════════
+
+# ============================================================
+# MODELOS
+# ============================================================
 
 @dataclass
 class TextNode:
@@ -27,20 +38,169 @@ class TextNode:
 @dataclass
 class NodeWithScore:
     node: TextNode
-    score: float
+
+    # Score original de la fuente
+    score: float = 0.0
+
+    # Scores normalizados
+    vector_score: float = 0.0
+    graph_score: float = 0.0
+    keyword_score: float = 0.0
+
+    # Score final
+    final_score: float = 0.0
 
 
-# ═══════════════════════════════════════════════════════════════
-# Retriever híbrido
-# ═══════════════════════════════════════════════════════════════
+# ============================================================
+# CONSTANTES DE RANKING
+# ============================================================
+
+VECTOR_WEIGHT = 0.50
+GRAPH_WEIGHT = 0.20
+KEYWORD_WEIGHT = 0.20
+ENTITY_WEIGHT = 0.10
+
+
+# ============================================================
+# PATRONES
+# ============================================================
+
+JAVA_SUFFIXES = (
+    "Impl",
+    "Service",
+    "Repository",
+    "Repo",
+    "Dao",
+    "DAO",
+    "Mapper",
+    "Controller",
+    "Dto",
+    "DTO",
+    "Entity",
+    "Config",
+    "Util",
+    "Factory",
+    "Handler",
+    "Listener",
+    "Task",
+    "Job",
+    "Processor",
+    "Writer",
+    "Reader",
+    "Interceptor",
+    "Filter",
+    "Endpoint",
+    "Client",
+    "Provider",
+    "Adapter",
+    "Facade",
+    "Builder",
+    "Validator",
+    "Converter",
+    "Parser",
+    "Scheduler",
+    "Resolver",
+    "Registry",
+    "Cache",
+    "Connection",
+    "Transaction",
+    "Context",
+    "Event",
+    "Message",
+    "Command",
+    "Query",
+    "Request",
+    "Response",
+    "Result",
+    "Wrapper",
+    "Proxy",
+    "Indexer",
+    "Extractor",
+    "Loader",
+    "Saver",
+    "Retriever",
+    "Updater",
+    "Creator",
+    "Initializer",
+    "Dispatcher",
+    "Router",
+    "Producer",
+    "Consumer",
+)
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def _normalize_score(score: float) -> float:
+    """
+    Normaliza scores externos a un rango aproximado 0..1.
+    """
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+
+    return max(0.0, min(1.0, value))
+
+
+def _extract_identifiers(query: str) -> list[str]:
+    """
+    Extrae posibles nombres de clases, interfaces y entidades Java.
+    """
+
+    candidates = re.findall(
+        r"\b[A-Z][a-zA-Z0-9_]{2,}\b",
+        query,
+    )
+
+    result = []
+
+    for candidate in candidates:
+
+        if candidate in {
+            "Qué",
+            "Que",
+            "Cómo",
+            "Como",
+            "Dónde",
+            "Donde",
+            "Cuál",
+            "Cual",
+            "Explícame",
+            "Explicame",
+        }:
+            continue
+
+        # Priorizar nombres que parecen Java
+        if (
+            candidate.endswith(JAVA_SUFFIXES)
+            or "_" in candidate
+        ):
+            result.append(candidate)
+
+    return list(dict.fromkeys(result))
+
+
+def _extract_methods(query: str) -> list[str]:
+    """
+    Detecta nombres con formato método(...).
+    """
+
+    matches = re.findall(
+        r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
+        query,
+    )
+
+    return list(dict.fromkeys(matches))
+
+
+# ============================================================
+# RETRIEVER
+# ============================================================
 
 class CodeGraphRetriever:
-    """
-    Retriever que combina:
-      1. Búsqueda vectorial en Qdrant (similitud semántica)
-      2. Expansión por grafo en Neo4j (vecinos de entidades encontradas)
-      3. Búsqueda por nombre exacto (si la query menciona un identificador)
-    """
 
     def __init__(
         self,
@@ -56,108 +216,554 @@ class CodeGraphRetriever:
         self.graph_depth = graph_depth
         self.name_search_limit = name_search_limit
 
-    async def retrieve(self, query: str) -> list[NodeWithScore]:
+    # ========================================================
+    # MAIN RETRIEVAL
+    # ========================================================
+
+    async def retrieve(
+        self,
+        query: str,
+    ) -> list[NodeWithScore]:
+
         nodes: dict[str, NodeWithScore] = {}
 
-        # ── 1. Búsqueda vectorial ──
+        identifiers = _extract_identifiers(query)
+        methods = _extract_methods(query)
+
+        logger.info(
+            "RAG query repo=%s branch=%s identifiers=%s methods=%s",
+            self.repo,
+            self.branch,
+            identifiers,
+            methods,
+        )
+
+        # ====================================================
+        # 1. VECTOR SEARCH
+        # ====================================================
+
+        await self._vector_search(
+            query,
+            nodes,
+        )
+
+        # ====================================================
+        # 2. EXACT NAME SEARCH
+        # ====================================================
+
+        await self._keyword_search(
+            identifiers,
+            nodes,
+        )
+
+        # ====================================================
+        # 3. GRAPH EXPANSION
+        # ====================================================
+
+        await self._graph_expansion(
+            nodes,
+        )
+
+        # ====================================================
+        # 4. ENTITY / METHOD BOOST
+        # ====================================================
+
+        self._apply_entity_boost(
+            nodes,
+            identifiers,
+            methods,
+        )
+
+        # ====================================================
+        # 5. FINAL RANKING
+        # ====================================================
+
+        results = self._rerank(
+            nodes,
+        )
+
+        logger.info(
+            "RAG final results=%d",
+            len(results),
+        )
+
+        return results
+
+    # ========================================================
+    # VECTOR
+    # ========================================================
+
+    async def _vector_search(
+        self,
+        query: str,
+        nodes: dict[str, NodeWithScore],
+    ):
+
         try:
+
             client = get_client()
+
+            embedding = await embedder.get_embedding(
+                query
+            )
+
             vector_results = search_chunks(
                 client,
                 QDRANT_COLLECTION,
-                await embedder.get_embedding(query),
+                embedding,
                 self.repo,
                 self.branch,
                 self.vector_limit,
             )
-            for r in vector_results:
-                entity_id = r.get("entity_id")
-                key = entity_id or f"{r['file_path']}:{r.get('position', 0)}"
+
+            for result in vector_results:
+
+                entity_id = result.get(
+                    "entity_id"
+                )
+
+                file_path = result.get(
+                    "file_path",
+                    "",
+                )
+
+                position = result.get(
+                    "position",
+                    0,
+                )
+
+                # Entity ID es la mejor clave.
+                # Si no existe, usamos archivo + posición.
+                key = (
+                    str(entity_id)
+                    if entity_id
+                    else f"{file_path}:{position}"
+                )
+
+                vector_score = _normalize_score(
+                    result.get(
+                        "score",
+                        0.0,
+                    )
+                )
+
                 node = TextNode(
-                    text=r.get("text", ""),
+                    text=result.get(
+                        "text",
+                        "",
+                    ),
                     metadata={
-                        "repo": r.get("repo"),
-                        "branch": r.get("branch"),
-                        "file_path": r.get("file_path"),
-                        "language": r.get("language"),
+                        "repo": result.get(
+                            "repo"
+                        ),
+                        "branch": result.get(
+                            "branch"
+                        ),
+                        "file_path": file_path,
+                        "language": result.get(
+                            "language"
+                        ),
                         "entity_id": entity_id,
-                        "ast_type": r.get("ast_type"),
-                        "ast_name": r.get("ast_name"),
-                        "ast_signature": r.get("ast_signature"),
+                        "ast_type": result.get(
+                            "ast_type"
+                        ),
+                        "ast_name": result.get(
+                            "ast_name"
+                        ),
+                        "ast_signature": result.get(
+                            "ast_signature"
+                        ),
                         "source": "vector",
                     },
                 )
-                nodes[key] = NodeWithScore(node=node, score=r.get("score", 0.0))
+
+                nodes[key] = NodeWithScore(
+                    node=node,
+                    score=vector_score,
+                    vector_score=vector_score,
+                )
+
         except Exception as exc:
-            logger.warning("Error en búsqueda vectorial: %s", exc)
 
-        # ── 2. Expansión por grafo ──
-        entity_ids = [n.node.metadata["entity_id"] for n in nodes.values() if n.node.metadata.get("entity_id")]
-        for eid in set(entity_ids):
+            logger.warning(
+                "Error en búsqueda vectorial: %s",
+                exc,
+            )
+
+    # ========================================================
+    # KEYWORD / EXACT NAME
+    # ========================================================
+
+    async def _keyword_search(
+        self,
+        identifiers: list[str],
+        nodes: dict[str, NodeWithScore],
+    ):
+
+        for identifier in identifiers[
+            : self.name_search_limit
+        ]:
+
             try:
-                related = graph_store.get_related_entities(eid, depth=self.graph_depth)
-                for rel in related:
-                    key = rel["id"]
-                    if key in nodes:
-                        nodes[key].score = max(nodes[key].score, 0.5 / rel.get("distance", 1))
-                        continue
-                    node = TextNode(
-                        text=rel.get("code", ""),
-                        metadata={
-                            "repo": self.repo,
-                            "branch": self.branch,
-                            "file_path": rel.get("file_path", ""),
-                            "entity_id": rel["id"],
-                            "ast_name": rel.get("name", ""),
-                            "ast_type": rel.get("type", ""),
-                            "ast_signature": rel.get("signature", ""),
-                            "source": "graph",
-                            "distance": rel.get("distance", 1),
-                        },
+
+                keyword_results = (
+                    graph_store.search_by_name(
+                        identifier,
+                        repo=self.repo,
+                        branch=self.branch,
                     )
-                    distance = rel.get("distance", 1)
-                    score = 0.6 / distance
-                    nodes[key] = NodeWithScore(node=node, score=score)
-            except Exception as exc:
-                logger.warning("Error en expansión de grafo para %s: %s", eid, exc)
+                )
 
-        # ── 3. Búsqueda por nombre exacto (keyword) ──
-        _SUFFIX_PATTERN = r"(?:Impl|Dao|Service|Repository|Mapper|Controller|Dto|Entity|Config|Util|Factory|Handler|Listener|Task|Job|Processor|Writer|Reader|Interceptor|Filter|Endpoint|Client|Provider|Adapter|Facade|Builder|Validator|Converter|Parser|Renderer|Generator|Scheduler|Resolver|Registry|Cache|Pool|Queue|Map|Tree|Node|Connection|Transaction|Context|Event|Message|Command|Query|Request|Response|Result|Source|Target|Reference|Wrapper|Proxy|Mock|Spy|Checker|Tester|Inspector|Finder|Searcher|Indexer|Extractor|Loader|Saver|Retriever|Updater|Creator|Initializer|Activator|Dispatcher|Router|Balancer|Distributor|Assigner|Configurer|Setter|Getter|Accessor|Builder|Producer|Consumer|Subscriber|Publisher|Emitter|Receiver|Sender|Transmitter|Host|Client|Server|Helper|Utility|Tool|Api|Sdk|Cli|Ui|Web|Rest|Soap|Grpc|Graphql|Websocket|Socket|Port|Channel|Pipe|Stream|Flow|Pipeline|Chain|Sequence|Batch|Bundle|Package|Module|Component|Part|Section|Segment|Fragment|Chunk|Block|Unit|Item|Element|Member|Field|Property|Attribute|Parameter|Argument|Option|Setting|Configuration|Policy|Rule|Strategy|Pattern|Template|Schema|Model|Blueprint|Plan|Design|Layout|Structure|Framework|Platform|System|Engine|Kernel|Core|Base|Root|Foundation|Layer|Tier|Level|Stage|Phase|Step|Action|Operation|Process|Procedure|Routine|Function|Method|Subroutine|Macro|Script|Program|Application|App)"
-        candidates = re.findall(rf"\b([A-Z][a-zA-Z0-9]*(?:{_SUFFIX_PATTERN})?)\b", query)
-        candidates = [c for c in candidates if len(c) > 2]
-        for cand in set(candidates[:self.name_search_limit]):
-            try:
-                keyword_results = graph_store.search_by_name(cand, repo=self.repo, branch=self.branch)
-                for kr in keyword_results[:3]:
-                    key = kr["id"]
+                for result in keyword_results[:3]:
+
+                    key = str(
+                        result["id"]
+                    )
+
+                    keyword_score = 1.0
+
                     if key in nodes:
-                        nodes[key].score = max(nodes[key].score, 0.9)
+
+                        nodes[key].keyword_score = max(
+                            nodes[key].keyword_score,
+                            keyword_score,
+                        )
+
                         continue
+
                     node = TextNode(
-                        text=kr.get("code", ""),
+                        text=result.get(
+                            "code",
+                            "",
+                        ),
                         metadata={
                             "repo": self.repo,
                             "branch": self.branch,
-                            "file_path": kr.get("file_path", ""),
-                            "entity_id": kr["id"],
-                            "ast_name": kr.get("name", ""),
-                            "ast_type": kr.get("type", ""),
-                            "ast_signature": kr.get("signature", ""),
+                            "file_path": result.get(
+                                "file_path",
+                                "",
+                            ),
+                            "entity_id": result["id"],
+                            "ast_name": result.get(
+                                "name",
+                                "",
+                            ),
+                            "ast_type": result.get(
+                                "type",
+                                "",
+                            ),
+                            "ast_signature": result.get(
+                                "signature",
+                                "",
+                            ),
                             "source": "keyword",
+                            "matched_identifier": identifier,
                         },
                     )
-                    nodes[key] = NodeWithScore(node=node, score=0.9)
+
+                    nodes[key] = NodeWithScore(
+                        node=node,
+                        score=keyword_score,
+                        keyword_score=keyword_score,
+                    )
+
             except Exception as exc:
-                logger.warning("Error en búsqueda por nombre %s: %s", cand, exc)
 
-        # Ordenar por score descendente y devolver
-        sorted_nodes = sorted(nodes.values(), key=lambda n: n.score, reverse=True)
-        return sorted_nodes
+                logger.warning(
+                    "Error en búsqueda exacta %s: %s",
+                    identifier,
+                    exc,
+                )
+
+    # ========================================================
+    # GRAPH EXPANSION
+    # ========================================================
+
+    async def _graph_expansion(
+        self,
+        nodes: dict[str, NodeWithScore],
+    ):
+
+        entity_ids = {
+            node.node.metadata.get(
+                "entity_id"
+            )
+            for node in nodes.values()
+            if node.node.metadata.get(
+                "entity_id"
+            )
+        }
+
+        for entity_id in entity_ids:
+
+            try:
+
+                related = (
+                    graph_store.get_related_entities(
+                        entity_id,
+                        depth=self.graph_depth,
+                    )
+                )
+
+                for relation in related:
+
+                    relation_id = str(
+                        relation["id"]
+                    )
+
+                    distance = max(
+                        int(
+                            relation.get(
+                                "distance",
+                                1,
+                            )
+                        ),
+                        1,
+                    )
+
+                    # Cuanto más cerca,
+                    # mayor relevancia.
+                    graph_score = 1.0 / distance
+
+                    if relation_id in nodes:
+
+                        nodes[
+                            relation_id
+                        ].graph_score = max(
+                            nodes[
+                                relation_id
+                            ].graph_score,
+                            graph_score,
+                        )
+
+                        continue
+
+                    node = TextNode(
+                        text=relation.get(
+                            "code",
+                            "",
+                        ),
+                        metadata={
+                            "repo": self.repo,
+                            "branch": self.branch,
+                            "file_path": relation.get(
+                                "file_path",
+                                "",
+                            ),
+                            "entity_id": relation_id,
+                            "ast_name": relation.get(
+                                "name",
+                                "",
+                            ),
+                            "ast_type": relation.get(
+                                "type",
+                                "",
+                            ),
+                            "ast_signature": relation.get(
+                                "signature",
+                                "",
+                            ),
+                            "source": "graph",
+                            "distance": distance,
+                        },
+                    )
+
+                    nodes[relation_id] = NodeWithScore(
+                        node=node,
+                        score=graph_score,
+                        graph_score=graph_score,
+                    )
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Error en expansión de grafo %s: %s",
+                    entity_id,
+                    exc,
+                )
+
+    # ========================================================
+    # ENTITY / METHOD BOOST
+    # ========================================================
+
+    def _apply_entity_boost(
+        self,
+        nodes: dict[str, NodeWithScore],
+        identifiers: list[str],
+        methods: list[str],
+    ):
+
+        identifiers_lower = [
+            x.lower()
+            for x in identifiers
+        ]
+
+        methods_lower = [
+            x.lower()
+            for x in methods
+        ]
+
+        for result in nodes.values():
+
+            metadata = result.node.metadata
+
+            ast_name = str(
+                metadata.get(
+                    "ast_name",
+                    "",
+                )
+            ).lower()
+
+            file_path = str(
+                metadata.get(
+                    "file_path",
+                    "",
+                )
+            ).lower()
+
+            text = result.node.text.lower()
+
+            # ----------------------------------------------
+            # Exact class/entity
+            # ----------------------------------------------
+
+            for identifier in identifiers_lower:
+
+                if ast_name == identifier:
+
+                    result.keyword_score = max(
+                        result.keyword_score,
+                        1.0,
+                    )
+
+                elif identifier in file_path:
+
+                    result.keyword_score = max(
+                        result.keyword_score,
+                        0.90,
+                    )
+
+                elif identifier in text:
+
+                    result.keyword_score = max(
+                        result.keyword_score,
+                        0.70,
+                    )
+
+            # ----------------------------------------------
+            # Method match
+            # ----------------------------------------------
+
+            for method in methods_lower:
+
+                if re.search(
+                    rf"\b{re.escape(method)}\s*\(",
+                    text,
+                ):
+
+                    result.keyword_score = max(
+                        result.keyword_score,
+                        0.95,
+                    )
+
+    # ========================================================
+    # RERANK
+    # ========================================================
+
+    def _rerank(
+        self,
+        nodes: dict[str, NodeWithScore],
+    ) -> list[NodeWithScore]:
+
+        results = list(
+            nodes.values()
+        )
+
+        for result in results:
+
+            vector = _normalize_score(
+                result.vector_score
+            )
+
+            graph = _normalize_score(
+                result.graph_score
+            )
+
+            keyword = _normalize_score(
+                result.keyword_score
+            )
+
+            # ----------------------------------------------
+            # Fusion
+            # ----------------------------------------------
+
+            final_score = (
+                vector * VECTOR_WEIGHT
+                + graph * GRAPH_WEIGHT
+                + keyword * KEYWORD_WEIGHT
+            )
+
+            # ----------------------------------------------
+            # Entity bonus
+            # ----------------------------------------------
+
+            metadata = result.node.metadata
+
+            if metadata.get(
+                "ast_name"
+            ):
+
+                final_score += (
+                    ENTITY_WEIGHT
+                    * min(
+                        keyword,
+                        1.0,
+                    )
+                )
+
+            # ----------------------------------------------
+            # Multi-source bonus
+            # ----------------------------------------------
+
+            source = metadata.get(
+                "source",
+                "",
+            )
+
+            if (
+                vector > 0
+                and graph > 0
+            ):
+                final_score += 0.08
+
+            if (
+                keyword > 0
+                and vector > 0
+            ):
+                final_score += 0.08
+
+            # ----------------------------------------------
+            # Cap
+            # ----------------------------------------------
+
+            result.final_score = min(
+                final_score,
+                1.20,
+            )
+
+            result.score = result.final_score
+
+        results.sort(
+            key=lambda result: result.final_score,
+            reverse=True,
+        )
+
+        return results
 
 
-# ═══════════════════════════════════════════════════════════════
-# API pública del RAG engine
-# ═══════════════════════════════════════════════════════════════
+# ============================================================
+# PUBLIC API
+# ============================================================
 
 async def search_graph(
     query: str,
@@ -167,42 +773,144 @@ async def search_graph(
     graph_depth: int = 2,
 ) -> list[dict]:
     """
-    Búsqueda híbrida vector + grafo. Devuelve lista de dicts con el mismo
-    formato que el endpoint /search actual para compatibilidad.
+    Búsqueda híbrida:
+
+    Qdrant + Neo4j + exact match + reranking.
+
+    Mantiene el formato de respuesta compatible
+    con el endpoint /search-graph.
     """
+
     retriever = CodeGraphRetriever(
         repo=repo,
         branch=branch,
-        vector_limit=limit * 3,
+        vector_limit=max(
+            limit * 4,
+            30,
+        ),
         graph_depth=graph_depth,
+        name_search_limit=5,
     )
-    results = await retriever.retrieve(query)
+
+    results = await retriever.retrieve(
+        query
+    )
 
     output = []
-    for r in results[:limit]:
-        meta = r.node.metadata
-        output.append({
-            "score": float(r.score),
-            "repo": meta.get("repo", repo or ""),
-            "branch": meta.get("branch", branch or ""),
-            "file_path": meta.get("file_path", ""),
-            "language": meta.get("language", ""),
-            "text": r.node.text,
-            "entity_id": meta.get("entity_id"),
-            "ast_type": meta.get("ast_type"),
-            "ast_name": meta.get("ast_name"),
-            "ast_signature": meta.get("ast_signature"),
-            "source": meta.get("source", "unknown"),
-        })
+
+    for result in results[:limit]:
+
+        metadata = result.node.metadata
+
+        output.append(
+            {
+                "score": float(
+                    result.final_score
+                ),
+
+                "vector_score": float(
+                    result.vector_score
+                ),
+
+                "graph_score": float(
+                    result.graph_score
+                ),
+
+                "keyword_score": float(
+                    result.keyword_score
+                ),
+
+                "repo": metadata.get(
+                    "repo",
+                    repo or "",
+                ),
+
+                "branch": metadata.get(
+                    "branch",
+                    branch or "",
+                ),
+
+                "file_path": metadata.get(
+                    "file_path",
+                    "",
+                ),
+
+                "language": metadata.get(
+                    "language",
+                    "",
+                ),
+
+                "text": result.node.text,
+
+                "entity_id": metadata.get(
+                    "entity_id"
+                ),
+
+                "ast_type": metadata.get(
+                    "ast_type"
+                ),
+
+                "ast_name": metadata.get(
+                    "ast_name"
+                ),
+
+                "ast_signature": metadata.get(
+                    "ast_signature"
+                ),
+
+                "source": metadata.get(
+                    "source",
+                    "unknown",
+                ),
+            }
+        )
+
     return output
 
 
-async def search_entity_in_graph(name: str, repo: str | None = None, branch: str | None = None) -> dict | None:
-    """Busca una entidad por nombre exacto y devuelve su contexto de grafo."""
-    results = graph_store.search_by_name(name, repo=repo, branch=branch)
-    if not results:
+# ============================================================
+# ENTITY SEARCH
+# ============================================================
+
+async def search_entity_in_graph(
+    name: str,
+    repo: str | None = None,
+    branch: str | None = None,
+) -> dict | None:
+    """
+    Busca una entidad por nombre exacto
+    y devuelve contexto + relaciones directas.
+    """
+
+    try:
+
+        results = graph_store.search_by_name(
+            name,
+            repo=repo,
+            branch=branch,
+        )
+
+        if not results:
+            return None
+
+        best = results[0]
+
+        entity_id = best["id"]
+
+        full = (
+            graph_store.get_entity_with_direct_relations(
+                entity_id
+            )
+        )
+
+        return full or best
+
+    except Exception as exc:
+
+        logger.warning(
+            "Error buscando entidad %s: %s",
+            name,
+            exc,
+        )
+
         return None
-    best = results[0]
-    entity_id = best["id"]
-    full = graph_store.get_entity_with_direct_relations(entity_id)
-    return full or best
