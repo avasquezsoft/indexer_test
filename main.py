@@ -661,7 +661,7 @@ async def fetch_file(req: FetchFileRequest):
     Primero intenta leer del clon local; si no existe, fallback a GitHub API.
     """
     # 1) Intentar leer del clon local
-    local_content = repo_clone.read_file_from_clone(req.repo, req.file_path)
+    local_content = repo_clone.read_file_from_clone(req.repo, req.file_path, req.branch)
     if local_content is not None:
         log.info("Fetch local: %s/%s (desde clon)", req.repo, req.file_path)
         return {
@@ -842,61 +842,50 @@ async def generate_markdown(req: MarkdownRequest):
 class SearchCloneRequest(BaseModel):
     repo: str
     branch: str = "HEAD"
-    keywords: list[str]
+    keywords: list[str] = []
+    entities: list[str] = []   # clases mencionadas: su archivo va primero
+    methods: list[str] = []    # métodos mencionados: su cuerpo se incluye completo
     max_files: int = 20
-    max_chars_per_file: int = 15000
+    max_chars_per_file: int = 40000
 
 
 @app.post("/search-clone", dependencies=[Depends(verify_api_key)])
 async def search_clone(req: SearchCloneRequest):
     """
-    Busca archivos en el clon local que contengan alguna de las keywords.
+    Busca en el clon local de repo@branch los archivos más relevantes para la
+    pregunta. Si el clon no existe, lo crea en el momento.
     Útil cuando la búsqueda vectorial/grafo no trae suficiente contexto.
     """
-    clone_path = repo_clone._get_clone_path(req.repo)
-    if not os.path.isdir(clone_path):
-        log.warning("Clon local no encontrado para %s", req.repo)
+    if not _REPO_PATTERN.match(req.repo):
+        raise HTTPException(status_code=400, detail="repo debe tener formato 'org/repo'")
+    if not (req.keywords or req.entities or req.methods):
         return {"results": []}
 
-    keywords_lower = [k.lower() for k in req.keywords if k]
-    if not keywords_lower:
-        return {"results": []}
+    clone_path = repo_clone._get_clone_path(req.repo, req.branch)
+    if not os.path.isdir(os.path.join(clone_path, ".git")):
+        log.info("Clon local no encontrado para %s @ %s: clonando bajo demanda", req.repo, req.branch)
+        try:
+            if not await repo_clone.clone_or_pull_repo(req.repo, req.branch):
+                return {"results": []}
+        except Exception as exc:
+            log.warning("No se pudo clonar %s @ %s: %s", req.repo, req.branch, exc)
+            return {"results": []}
 
-    matched = 0
-    results = []
-
-    for root, dirs, fnames in os.walk(clone_path):
-        dirs[:] = [d for d in dirs if d not in repo_clone._IGNORED_DIRS]
-        for fname in fnames:
-            if matched >= req.max_files:
-                break
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in repo_clone._CLONE_SEARCH_EXTS:
-                continue
-            fpath = os.path.join(root, fname)
-            rel_path = os.path.relpath(fpath, clone_path).replace("\\", "/")
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                    if any(kw in content.lower() for kw in keywords_lower):
-                        if len(content) > req.max_chars_per_file:
-                            content = (
-                                content[:req.max_chars_per_file]
-                                + f"\n\n-- ... archivo truncado ({len(content)} chars originales) ... --\n"
-                            )
-                        results.append({
-                            "file_path": rel_path,
-                            "content": content,
-                            "repo": req.repo,
-                            "branch": req.branch,
-                        })
-                        matched += 1
-            except Exception:
-                continue
-        if matched >= req.max_files:
-            break
-
-    log.info("Búsqueda en clon para %s: %d archivos encontrados (keywords=%s)", req.repo, len(results), keywords_lower)
+    results = await asyncio.to_thread(
+        repo_clone.search_clone,
+        req.repo,
+        req.branch,
+        req.keywords,
+        req.entities,
+        req.methods,
+        req.max_files,
+        req.max_chars_per_file,
+    )
+    log.info(
+        "Búsqueda en clon %s @ %s: %d archivos (exactos=%d, keywords=%s, entidades=%s)",
+        req.repo, req.branch, len(results),
+        sum(1 for r in results if r["match"] == "name"), req.keywords, req.entities,
+    )
     return {"results": results}
 
 

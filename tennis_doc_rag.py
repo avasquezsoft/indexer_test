@@ -1,6 +1,6 @@
 """
 title: Tennis Doc RAG
-version: 3.0
+version: 3.1
 requirements: requests
 description: Filtro para Open WebUI que recupera contexto de código desde Tennis Doc IA.
 
@@ -18,7 +18,9 @@ inlet()  ── comandos (repos, indexar, grafo, pdf)  ──> resultado exacto 
     |       /search-augmented   archivos completos / contexto ampliado
     |       /search-graph       Qdrant + Neo4j + exact match
     |       /graph/entity/{n}   entidad completa + relaciones
-    |   luego, si falta contexto:
+    |       /search-clone       si se nombra una clase/método: su archivo real
+    |                           desde el clon (condensado si es muy grande)
+    |   luego, si aún falta contexto:
     |       /search-clone       fallback por keywords
     |
     +── fusión RRF + deduplicación + presupuesto de tokens
@@ -482,6 +484,9 @@ _SOURCE_WEIGHTS = {
     "graph": 1.0,
     "augmented": 1.0,
     "relation": 0.6,
+    # Archivo cuyo nombre es la clase preguntada, leído del clon
+    # (además se fuerza al primer lugar en _fetch_context).
+    "clone_exact": 1.5,
     "clone": 0.4,
 }
 
@@ -559,7 +564,13 @@ class Filter:
         max_results: int = 20
         max_entity_relations: int = 5
         clone_max_files: int = 15
-        clone_max_chars: int = 12000
+        clone_max_chars: int = Field(
+            default=40000,
+            description=(
+                "Máximo de caracteres por archivo del clon. Los archivos Java más "
+                "grandes se condensan (firmas + métodos relevantes completos)."
+            ),
+        )
         request_timeout: int = Field(default=45, description="Segundos por llamada.")
         repos_cache_seconds: int = 60
 
@@ -1375,11 +1386,11 @@ class Filter:
 
         return entity_results, relation_results
 
-    def _search_clone(self, repo, branch, query, errors):
+    def _search_clone(self, repo, branch, query, analysis, errors):
 
         keywords = self._extract_keywords(query)
 
-        if not repo or not keywords:
+        if not repo or not (keywords or analysis["entities"] or analysis["methods"]):
 
             return []
 
@@ -1391,6 +1402,8 @@ class Filter:
                     "repo": repo,
                     "branch": branch,
                     "keywords": keywords,
+                    "entities": analysis["entities"],
+                    "methods": analysis["methods"],
                     "max_files": self.valves.clone_max_files,
                     "max_chars_per_file": self.valves.clone_max_chars,
                 },
@@ -1405,17 +1418,21 @@ class Filter:
 
                 results.append(
                     {
-                        "score": 0.35,
+                        "score": 1.0 if item.get("match") == "name" else item.get("keyword_hits", 0) / 100,
                         "repo": repo,
                         "branch": branch,
                         "file_path": item.get("file_path", ""),
                         "language": item.get("language", ""),
                         "text": item.get("content", ""),
-                        "source": "clone",
+                        "source": "clone_exact" if item.get("match") == "name" else "clone",
+                        "full_file": True,
                     }
                 )
 
-            self._log(f"Fallback clone → {len(results)}")
+            self._log(
+                f"/search-clone → {len(results)} "
+                f"| exactos={sum(1 for r in results if r['source'] == 'clone_exact')}"
+            )
 
             return results
 
@@ -1534,7 +1551,11 @@ class Filter:
 
         self._status("🔎 Buscando en el código indexado…")
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        # Si se nombra una clase o método, el archivo real se busca en el clon
+        # en paralelo: el índice puede tener la clase partida o truncada.
+        named = bool(repo and (entity_names or analysis["methods"]))
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
 
             fut_aug = pool.submit(self._search_augmented, repo, branch, search_query, errors)
 
@@ -1550,6 +1571,12 @@ class Filter:
                 else None
             )
 
+            fut_clone = (
+                pool.submit(self._search_clone, repo, branch, retrieval_query or query, analysis, errors)
+                if named
+                else None
+            )
+
             lists = {"augmented": fut_aug.result()}
 
             if fut_graph:
@@ -1560,17 +1587,45 @@ class Filter:
 
                 lists["entity"], lists["relation"] = fut_entities.result()
 
+            if fut_clone:
+
+                clone_results = fut_clone.result()
+
+                lists["clone_exact"] = [r for r in clone_results if r["source"] == "clone_exact"]
+
+                lists["clone"] = [r for r in clone_results if r["source"] == "clone"]
+
+        # El archivo del clon (completo o condensado) reemplaza a los
+        # fragmentos del mismo archivo que trajo el índice.
+        exact_files = {r["file_path"] for r in lists.get("clone_exact", [])}
+
+        if exact_files:
+
+            for source in ("augmented", "graph", "entity", "relation"):
+
+                if source in lists:
+
+                    lists[source] = [
+                        r for r in lists[source] if r.get("file_path") not in exact_files
+                    ]
+
         total = sum(len(v) for v in lists.values())
 
         total_chars = sum(len(r.get("text") or "") for v in lists.values() for r in v)
 
-        if repo and (total < 6 or total_chars < 12000):
+        if repo and not fut_clone and (total < 6 or total_chars < 12000):
 
             self._status("📂 Buscando por palabras clave en el repositorio…")
 
-            lists["clone"] = self._search_clone(repo, branch, retrieval_query or query, errors)
+            lists["clone"] = self._search_clone(repo, branch, retrieval_query or query, analysis, errors)
 
-        fused = self._fuse(lists)[: self.valves.max_results]
+        fused = self._fuse(lists)
+
+        # El archivo de la clase preguntada siempre primero, para que el
+        # presupuesto de contexto nunca lo deje afuera.
+        fused.sort(key=lambda r: "clone_exact" not in r["_sources"])
+
+        fused = fused[: self.valves.max_results]
 
         self._log(
             f"Contexto final: {len(fused)} fragmentos "
@@ -1615,9 +1670,16 @@ class Filter:
 
                 continue
 
-            truncated = len(text) > self.valves.max_chars_per_chunk
+            # Los archivos del clon ya vienen recortados/condensados por el indexer.
+            limit = (
+                self.valves.clone_max_chars
+                if result.get("full_file")
+                else self.valves.max_chars_per_chunk
+            )
 
-            text = text[: self.valves.max_chars_per_chunk]
+            truncated = len(text) > limit
+
+            text = text[:limit]
 
             repo = result.get("repo") or "?"
 
