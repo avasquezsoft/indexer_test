@@ -1,6 +1,6 @@
 """
 title: Tennis Doc RAG
-version: 3.3
+version: 3.4
 requirements: requests
 description: Filtro para Open WebUI que recupera contexto de código desde Tennis Doc IA.
 
@@ -45,6 +45,7 @@ Cambios v3
 
 import asyncio
 import base64
+import inspect
 import io
 import os
 import re
@@ -96,6 +97,9 @@ def _count_turns(messages):
 # Nivel de módulo para sobrevivir entre inlet y outlet.
 _PENDING = {}
 _PENDING_TTL = 600
+
+# Respuestas pedidas "en .md": outlet() adjunta el archivo descargable.
+_MD_PENDING = {}
 
 
 # ============================================================
@@ -173,10 +177,15 @@ _PDF_WORD_RE = re.compile(r"(?<!\.)\bpdf\b")
 
 _PDF_EXPLICIT_RE = re.compile(r"\b(?:en|a|como|formato|al)\s+(?:un\s+)?pdf\b")
 
-_MD_WORD_RE = re.compile(r"(?<!\.)\b(?:markdown|md)\b")
+# "markdown", "md" o " .md" suelto; no "README.md" (punto pegado a una palabra)
+_MD_WORD_RE = re.compile(r"(?<![\w.])\.?md\b|\bmarkdown\b")
 
 _MD_EXPLICIT_RE = re.compile(
-    r"\b(?:en|a|como|formato|al)\s+(?:un\s+)?(?:markdown|md)\b"
+    r"\b(?:en|a|como|formato|al)\s+(?:un\s+)?\.?(?:markdown|md)\b"
+    # "me generas un .md", "exportalo en markdown", "dame el .md para descargar"
+    r"|\b(?:genera\w*|crea\w*|exporta\w*|guarda\w*|descarga\w*|dame|hazme|haz|quiero|necesito|pasa\w*)"
+    r"\s+(?:\w+\s+){0,3}?(?:un\s+|el\s+|en\s+)?\.?(?:markdown|md)\b"
+    r"|(?<![\w.])\.?(?:markdown|md)\s+(?:para\s+)?descarga\w*"
 )
 
 # Preguntas SOBRE el código que genera PDF/MD, no peticiones de exportar.
@@ -2235,12 +2244,16 @@ y sugiere reformular mencionando la clase, el método o el repositorio
     # ========================================================
 
     @staticmethod
-    def _store_file(data, filename, content_type, user_id):
+    async def _store_file_async(data, filename, content_type, user_id):
         """
-        Guarda el archivo en el almacenamiento de Open WebUI y
-        devuelve su URL. Devuelve None si la API interna no está
-        disponible (cambia entre versiones).
+        Guarda el archivo en el almacenamiento de Open WebUI y devuelve su URL.
+        None si la API interna no está disponible (cambia entre versiones;
+        en las recientes insert_new_file/upload_file son async).
         """
+
+        async def maybe_await(value):
+
+            return await value if inspect.isawaitable(value) else value
 
         try:
 
@@ -2253,27 +2266,60 @@ y sugiere reformular mencionando la clase, el método o el repositorio
 
             try:
 
-                _, path = Storage.upload_file(io.BytesIO(data), stored_name, {})
+                uploaded = Storage.upload_file(io.BytesIO(data), stored_name, {})
 
             except TypeError:
 
-                _, path = Storage.upload_file(io.BytesIO(data), stored_name)
+                uploaded = Storage.upload_file(io.BytesIO(data), stored_name)
 
-            Files.insert_new_file(
-                user_id,
-                FileForm(
-                    id=file_id,
-                    filename=filename,
-                    path=path,
-                    meta={
-                        "name": filename,
-                        "content_type": content_type,
-                        "size": len(data),
-                    },
-                ),
+            _, path = await maybe_await(uploaded)
+
+            saved = await maybe_await(
+                Files.insert_new_file(
+                    user_id,
+                    FileForm(
+                        id=file_id,
+                        filename=filename,
+                        path=path,
+                        meta={
+                            "name": filename,
+                            "content_type": content_type,
+                            "size": len(data),
+                        },
+                    ),
+                )
             )
 
+            if not saved:
+
+                print(f"[TennisDoc RAG] Open WebUI no registró el archivo {filename}")
+
+                return None
+
             return f"/api/v1/files/{file_id}/content"
+
+        except Exception as exc:
+
+            print(f"[TennisDoc RAG] No pude guardar el archivo en Open WebUI: {exc}")
+
+            return None
+
+    def _store_file(self, data, filename, content_type, user_id):
+        """Versión para el hilo de _process: corre el guardado en el event loop de Open WebUI."""
+
+        loop = getattr(self._local, "loop", None)
+
+        if loop is None:
+
+            return None
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._store_file_async(data, filename, content_type, user_id), loop
+        )
+
+        try:
+
+            return future.result(timeout=60)
 
         except Exception as exc:
 
@@ -2457,10 +2503,12 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
     # PROCESO PRINCIPAL (síncrono, corre en un hilo aparte)
     # ========================================================
 
-    def _process(self, body, user, metadata, emit=None):
+    def _process(self, body, user, metadata, emit=None, loop=None):
 
-        # Emisor por hilo: evita mezclar eventos entre usuarios concurrentes.
+        # Emisor y loop por hilo: evita mezclar eventos entre usuarios concurrentes.
         self._local.emit = emit
+
+        self._local.loop = loop
 
         messages = body.get("messages") or []
 
@@ -2633,6 +2681,17 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
 
         self._log(f"Contexto inyectado: {len(used)} fragmentos | {len(context)} chars")
 
+        # Con la Tool activa, el modelo usa export_markdown; si no, lo adjunta outlet().
+        if markdown_mode and not self._tools_active(body, metadata):
+
+            key = (metadata or {}).get("chat_id") or body.get("chat_id") or "_default"
+
+            _MD_PENDING[key] = {
+                "title": f"Tennis_Doc_{repo.split('/')[-1]}" if repo else "Tennis_Doc",
+                "at": time.time(),
+                "turns": _count_turns(messages),
+            }
+
         return body
 
     # ========================================================
@@ -2668,7 +2727,7 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
             # Las llamadas HTTP son bloqueantes: se hacen en otro hilo
             # para no congelar Open WebUI mientras se busca.
             body = await asyncio.to_thread(
-                self._process, body, __user__, __metadata__, emit
+                self._process, body, __user__, __metadata__, emit, loop
             )
 
         except Exception as exc:
@@ -2681,52 +2740,103 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
 
         return body
 
+    def _apply_pending_command(self, body, key):
+        """Reemplaza la respuesta por el resultado exacto del comando (grafo, índice, PDF)."""
+
+        pending = _PENDING.get(key)
+
+        if not pending:
+
+            return
+
+        # Solo la respuesta de ESTE comando, nunca una posterior.
+        message_id = body.get("id")
+
+        if pending.get("message_id") and message_id:
+
+            matches = pending["message_id"] == message_id
+
+        else:
+
+            matches = _count_turns(body.get("messages")) == pending["turns"] + 1
+
+        if not matches:
+
+            if time.time() - pending["at"] > 120:
+
+                _PENDING.pop(key, None)
+
+            return
+
+        _PENDING.pop(key, None)
+
+        for message in reversed(body.get("messages") or []):
+
+            if message.get("role") == "assistant":
+
+                message["content"] = pending["content"]
+
+                break
+
+    async def _attach_markdown(self, body, key, user):
+        """Guarda la respuesta como .md y agrega el enlace de descarga al final."""
+
+        pending = _MD_PENDING.pop(key, None)
+
+        if not pending or time.time() - pending["at"] > _PENDING_TTL:
+
+            return
+
+        if _count_turns(body.get("messages")) != pending["turns"] + 1:
+
+            return
+
+        message = next(
+            (m for m in reversed(body.get("messages") or []) if m.get("role") == "assistant"),
+            None,
+        )
+
+        content = _text_of((message or {}).get("content"))
+
+        if not content:
+
+            return
+
+        filename = f"{pending['title']}.md"
+
+        data = content.encode("utf-8")
+
+        url = await self._store_file_async(data, filename, "text/markdown", (user or {}).get("id"))
+
+        if url:
+
+            link = f"📥 [Descargar {filename}]({url})"
+
+        else:
+
+            b64 = base64.b64encode(data).decode("utf-8")
+
+            link = f'<a href="data:text/markdown;base64,{b64}" download="{filename}">📥 Descargar {filename}</a>'
+
+        message["content"] = f"{content}\n\n---\n{link}"
+
+        self._log(f"Markdown adjuntado: {filename} | {len(data)} bytes")
+
     async def outlet(
         self,
         body: dict,
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
     ) -> dict:
-        """Muestra tal cual el resultado de un comando (grafo, índice, PDF)."""
+        """Muestra el resultado exacto de un comando y adjunta el .md si se pidió."""
 
         try:
 
             key = body.get("chat_id") or (__metadata__ or {}).get("chat_id") or "_default"
 
-            pending = _PENDING.get(key)
+            self._apply_pending_command(body, key)
 
-            if not pending:
-
-                return body
-
-            # Solo la respuesta de ESTE comando, nunca una posterior.
-            message_id = body.get("id")
-
-            if pending.get("message_id") and message_id:
-
-                matches = pending["message_id"] == message_id
-
-            else:
-
-                matches = _count_turns(body.get("messages")) == pending["turns"] + 1
-
-            if not matches:
-
-                if time.time() - pending["at"] > 120:
-
-                    _PENDING.pop(key, None)
-
-                return body
-
-            _PENDING.pop(key, None)
-
-            for message in reversed(body.get("messages") or []):
-
-                if message.get("role") == "assistant":
-
-                    message["content"] = pending["content"]
-
-                    break
+            await self._attach_markdown(body, key, __user__)
 
         except Exception as exc:
 

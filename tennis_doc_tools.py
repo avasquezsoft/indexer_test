@@ -1,10 +1,10 @@
 """
 title: Tennis Doc Tools
-version: 1.1
+version: 1.2
 requirements: requests
 description: Acciones de Tennis Doc IA que el modelo puede llamar solo (function calling):
              explorar el código (buscar, leer archivos, quién usa qué, flujo hasta SQL y
-             tablas, endpoints), listar/verificar repos, indexar, ver el grafo y exportar a PDF.
+             tablas, endpoints), listar/verificar repos, indexar, ver el grafo y exportar a PDF o .md.
 
 Uso
 ===
@@ -22,6 +22,7 @@ leer el archivo, ver quién la llama y seguir el flujo hasta el SQL y las tablas
 """
 
 import base64
+import inspect
 import io
 import os
 import uuid
@@ -736,39 +737,107 @@ class Tools:
 
         return self._cap("\n".join(lines))
 
-    async def export_last_answer_pdf(
+    @staticmethod
+    def _content_to_export(content, messages):
+        """El texto que pasó el modelo o, si viene vacío, la última respuesta del asistente."""
+
+        if content and content.strip():
+
+            return content
+
+        for message in reversed(messages or []):
+
+            if message.get("role") == "assistant" and message.get("content"):
+
+                value = message["content"]
+
+                if isinstance(value, list):
+
+                    value = " ".join(str(i.get("text", "")) for i in value if isinstance(i, dict))
+
+                return value
+
+        return ""
+
+    async def _deliver(self, data, filename, content_type, user, emitter):
+        """Guarda el archivo y muestra el enlace de descarga directo en el mensaje."""
+
+        url = await _store_file(data, filename, content_type, (user or {}).get("id"))
+
+        if url:
+
+            link = f"📥 [Descargar {filename}]({url})"
+
+        else:
+
+            b64 = base64.b64encode(data).decode("utf-8")
+
+            link = f'<a href="data:{content_type};base64,{b64}" download="{filename}">📥 Descargar {filename}</a>'
+
+        # El enlace se agrega directo al mensaje; el modelo no tiene que copiarlo.
+        if emitter:
+
+            await emitter({"type": "message", "data": {"content": f"\n\n{link}\n\n"}})
+
+    async def export_markdown(
         self,
+        content: str = "",
         title: str = "",
         __messages__: Optional[list] = None,
         __user__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> str:
         """
-        Convierte la última respuesta del asistente en un PDF descargable.
-        Úsala cuando el usuario pida exportar, descargar o guardar la respuesta en PDF.
+        Guarda un documento Markdown descargable (.md). Úsala cuando el usuario pida
+        la información en un archivo .md o "markdown para descargar". Si lo pide en el
+        mismo mensaje que la pregunta, primero redacta el documento completo en Markdown
+        y pásalo en content; si content va vacío se exporta tu respuesta anterior.
 
-        :param title: Título del documento (opcional).
+        :param content: Documento Markdown completo a guardar (opcional).
+        :param title: Nombre del archivo sin extensión (opcional).
         """
 
-        previous = None
+        text = self._content_to_export(content, __messages__)
 
-        for message in reversed(__messages__ or []):
+        if not text:
 
-            if message.get("role") == "assistant" and message.get("content"):
+            return "No hay contenido para exportar a Markdown."
 
-                previous = message
+        title = (title or "Tennis_Doc").strip().replace("/", "_").replace(" ", "_")
 
-                break
+        await self._status(__event_emitter__, "📝 Generando Markdown…")
 
-        if not previous:
+        await self._deliver(
+            text.encode("utf-8"), f"{title}.md", "text/markdown", __user__, __event_emitter__
+        )
+
+        await self._status(__event_emitter__, "Markdown listo", True)
+
+        return "Archivo .md generado y el enlace de descarga ya se mostró al usuario. Confírmalo en una frase."
+
+    async def export_last_answer_pdf(
+        self,
+        title: str = "",
+        content: str = "",
+        __messages__: Optional[list] = None,
+        __user__: Optional[dict] = None,
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Genera un PDF descargable. Úsala cuando el usuario pida exportar, descargar o
+        guardar en PDF. Si lo pide en el mismo mensaje que la pregunta, redacta primero
+        el contenido completo y pásalo en content; si content va vacío se exporta tu
+        respuesta anterior.
+
+        :param title: Título del documento (opcional).
+        :param content: Texto/Markdown a convertir en PDF (opcional).
+        """
+
+        text = self._content_to_export(content, __messages__)
+
+        if not text:
 
             return "No hay una respuesta anterior para convertir a PDF."
-
-        content = previous["content"]
-
-        if isinstance(content, list):
-
-            content = " ".join(str(i.get("text", "")) for i in content if isinstance(i, dict))
 
         title = (title or "Respuesta").strip().replace("/", "_").replace(" ", "_")
 
@@ -778,7 +847,7 @@ class Tools:
 
             response = requests.post(
                 self._url("/pdf"),
-                json={"title": title, "content": content},
+                json={"title": title, "content": text},
                 headers=self._headers(),
                 timeout=60,
             )
@@ -793,32 +862,20 @@ class Tools:
 
             return f"ERROR generando el PDF: {exc}"
 
-        url = _store_file(pdf, f"{title}.pdf", "application/pdf", (__user__ or {}).get("id"))
-
-        if url:
-
-            link = f"📄 [Descargar {title}.pdf]({url})"
-
-        else:
-
-            b64 = base64.b64encode(pdf).decode("utf-8")
-
-            link = (
-                f'<a href="data:application/pdf;base64,{b64}" download="{title}.pdf">'
-                "📄 Descargar PDF</a>"
-            )
-
-        # El enlace se agrega directo al mensaje; el modelo no tiene que copiarlo.
-        if __event_emitter__:
-
-            await __event_emitter__({"type": "message", "data": {"content": f"\n\n{link}\n\n"}})
+        await self._deliver(pdf, f"{title}.pdf", "application/pdf", __user__, __event_emitter__)
 
         await self._status(__event_emitter__, "PDF listo", True)
 
         return "PDF generado y el enlace de descarga ya se mostró al usuario. Confírmalo en una frase."
 
 
-def _store_file(data, filename, content_type, user_id):
+async def _maybe_await(value):
+    """Open WebUI cambió estas funciones a async en versiones recientes: soporta ambas."""
+
+    return await value if inspect.isawaitable(value) else value
+
+
+async def _store_file(data, filename, content_type, user_id):
     """Guarda el archivo en Open WebUI y devuelve su URL (None si falla)."""
 
     try:
@@ -832,21 +889,31 @@ def _store_file(data, filename, content_type, user_id):
 
         try:
 
-            _, path = Storage.upload_file(io.BytesIO(data), stored_name, {})
+            uploaded = Storage.upload_file(io.BytesIO(data), stored_name, {})
 
         except TypeError:
 
-            _, path = Storage.upload_file(io.BytesIO(data), stored_name)
+            uploaded = Storage.upload_file(io.BytesIO(data), stored_name)
 
-        Files.insert_new_file(
-            user_id,
-            FileForm(
-                id=file_id,
-                filename=filename,
-                path=path,
-                meta={"name": filename, "content_type": content_type, "size": len(data)},
-            ),
+        _, path = await _maybe_await(uploaded)
+
+        saved = await _maybe_await(
+            Files.insert_new_file(
+                user_id,
+                FileForm(
+                    id=file_id,
+                    filename=filename,
+                    path=path,
+                    meta={"name": filename, "content_type": content_type, "size": len(data)},
+                ),
+            )
         )
+
+        if not saved:
+
+            print(f"[TennisDoc Tools] Open WebUI no registró el archivo {filename}")
+
+            return None
 
         return f"/api/v1/files/{file_id}/content"
 
