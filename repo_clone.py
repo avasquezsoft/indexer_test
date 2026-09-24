@@ -8,9 +8,12 @@ Mantiene una copia local (shallow) de cada repo+rama en disco para:
 """
 
 import asyncio
+import io
 import logging
 import os
 import shutil
+
+from dulwich import porcelain
 
 from ast_parser import _get_parser
 from config import CLONE_BASE_DIR
@@ -33,15 +36,22 @@ def _get_clone_path(repo: str, branch: str = "HEAD") -> str:
     return os.path.join(CLONE_BASE_DIR, safe_name)
 
 
-async def _git(*args: str, secret: str) -> tuple[int, str]:
-    """Ejecuta git y devuelve (código, stderr) con el token enmascarado."""
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+def _dulwich_clone(url: str, target: str, branch: str, clean_url: str) -> None:
+    """Clon superficial con dulwich (git en Python puro: el contenedor no trae el binario git)."""
+    repo = porcelain.clone(
+        url,
+        target,
+        depth=1,
+        branch=None if branch == "HEAD" else branch,  # None = rama por defecto
+        errstream=io.BytesIO(),
     )
-    _, stderr = await proc.communicate()
-    return proc.returncode, stderr.decode(errors="replace").replace(secret, "***").strip()
+    try:
+        # Sin el token en .git/config
+        config = repo.get_config()
+        config.set((b"remote", b"origin"), b"url", clean_url.encode())
+        config.write_to_path()
+    finally:
+        repo.close()
 
 
 async def clone_or_pull_repo(repo: str, branch: str = "HEAD") -> str | None:
@@ -49,47 +59,37 @@ async def clone_or_pull_repo(repo: str, branch: str = "HEAD") -> str | None:
     Asegura que repo@branch esté clonado y actualizado en CLONE_BASE_DIR.
     Devuelve la ruta del clon, o None si no se pudo clonar.
 
-    El token de instalación dura 1 hora: se pide uno nuevo en cada operación
-    y nunca se guarda en .git/config.
+    Para actualizar se vuelve a clonar (depth=1, es liviano) y se reemplaza el
+    directorio. El token de instalación dura 1 hora: se pide uno nuevo cada vez.
     """
     path = _get_clone_path(repo, branch)
     owner, repo_name = repo.split("/", 1)
     token = await asyncio.to_thread(get_installation_token_for_repo, owner, repo_name)
     auth_url = f"https://x-access-token:{token}@github.com/{owner}/{repo_name}.git"
-
-    if os.path.isdir(os.path.join(path, ".git")):
-        logger.info("Actualizando clon %s @ %s", repo, branch)
-        # "git fetch <url> HEAD" trae la rama por defecto del remoto
-        code, err = await _git("-C", path, "fetch", "--depth", "1", auth_url, branch, secret=token)
-        if code != 0:
-            logger.warning("git fetch falló para %s @ %s: %s", repo, branch, err)
-            return path
-        code, err = await _git("-C", path, "reset", "--hard", "FETCH_HEAD", secret=token)
-        if code != 0:
-            logger.warning("git reset falló para %s @ %s: %s", repo, branch, err)
-        return path
+    clean_url = f"https://github.com/{owner}/{repo_name}.git"
 
     logger.info("Clonando %s @ %s en %s", repo, branch, path)
     os.makedirs(CLONE_BASE_DIR, exist_ok=True)
-    # Se clona en un directorio temporal y se renombra al final: si otro worker
-    # clona el mismo repo a la vez, nadie ve (ni borra) un clon a medias.
+    # Se clona en un directorio temporal y se reemplaza al final: nadie lee un
+    # clon a medias, y si falla se conserva el clon anterior.
     tmp_path = f"{path}.tmp-{os.getpid()}"
     shutil.rmtree(tmp_path, ignore_errors=True)
-    # git no acepta "--branch HEAD"; sin --branch clona la rama por defecto
-    branch_args = [] if branch == "HEAD" else ["--branch", branch]
-    code, err = await _git("clone", "--depth", "1", *branch_args, auth_url, tmp_path, secret=token)
-    if code != 0:
-        logger.error("git clone falló para %s @ %s: %s", repo, branch, err)
-        shutil.rmtree(tmp_path, ignore_errors=True)
-        return None
-
-    await _git("-C", tmp_path, "remote", "set-url", "origin",
-               f"https://github.com/{owner}/{repo_name}.git", secret=token)
     try:
+        await asyncio.to_thread(_dulwich_clone, auth_url, tmp_path, branch, clean_url)
+    except Exception as exc:
+        logger.error("Clon falló para %s @ %s: %s", repo, branch, str(exc).replace(token, "***"))
+        shutil.rmtree(tmp_path, ignore_errors=True)
+        return path if os.path.isdir(os.path.join(path, ".git")) else None
+
+    old_path = f"{path}.old-{os.getpid()}"
+    try:
+        if os.path.isdir(path):
+            os.rename(path, old_path)
         os.rename(tmp_path, path)
     except OSError:
-        # Otro worker terminó primero: se usa su clon
+        # Otro worker lo reemplazó a la vez: se usa el suyo
         shutil.rmtree(tmp_path, ignore_errors=True)
+    shutil.rmtree(old_path, ignore_errors=True)
     return path
 
 

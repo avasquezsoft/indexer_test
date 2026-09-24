@@ -254,8 +254,8 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
         # Asegurar clon local actualizado
         try:
-            await repo_clone.clone_or_pull_repo(full_repo_name, branch)
-            log.info("Clon local actualizado para %s @ %s", full_repo_name, branch)
+            if await repo_clone.clone_or_pull_repo(full_repo_name, branch):
+                log.info("Clon local actualizado para %s @ %s", full_repo_name, branch)
         except Exception as exc:
             log.warning("No se pudo actualizar clon local de %s: %s", full_repo_name, exc)
 
