@@ -174,6 +174,104 @@ def add_sql_links(entities: list[GraphEntity], resolve: Callable[[str, str], str
 
 
 # ═══════════════════════════════════════════════════════════════
+# Receptor de las llamadas (Java)
+# ═══════════════════════════════════════════════════════════════
+
+_CALL_NAME_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_RECEIVER_RE = re.compile(r"([A-Za-z_]\w*)\s*\.\s*$")
+_NOT_CALLS = {"if", "for", "while", "switch", "catch", "return", "synchronized", "new", "super", "this", "throw"}
+
+
+def _declared_type(code: str, var: str) -> str | None:
+    """Tipo de una variable declarada en el código: campo, parámetro, local o for-each."""
+    match = re.search(
+        rf"\b([A-Z][\w.]*)(?:\s*<[^;(){{}}]*?>)?(?:\[\]|\.\.\.)*\s+{re.escape(var)}\s*[=;,:)]",
+        code,
+    )
+    return match.group(1).split(".")[-1] if match else None
+
+
+def _receivers(code: str, name: str) -> set[str | None]:
+    """
+    Receptores con los que el código llama a `name(`:
+    "" = sin receptor (misma clase), "this"/"super", una variable/clase, o None si
+    no se puede saber (ej. a().name()).
+    """
+    found: set[str | None] = set()
+    for match in _CALL_NAME_RE.finditer(code):
+        if match.group(1) != name:
+            continue
+        before = code[: match.start()].rstrip()
+        if before.endswith("."):
+            receiver = _RECEIVER_RE.search(before)
+            found.add(receiver.group(1) if receiver else None)
+            continue
+        if before.endswith("@"):
+            continue  # anotación: @Nombre(...)
+        previous = re.search(r"(\w+)\W*$", before)
+        last_char = before[-1:] if before else ""
+        if previous and (last_char.isalnum() or last_char in "_>]"):
+            # "Tipo nombre(" es una declaración y "new Nombre(" un constructor;
+            # "return nombre(" o "throw nombre(" sí son llamadas.
+            if previous.group(1) in ("return", "throw", "else", "case", "yield"):
+                found.add("")
+            continue
+        found.add("")
+    return found
+
+
+def resolve_call_owners(entities: list[GraphEntity]) -> None:
+    """
+    Para cada CALLS de un método Java deduce en qué clases puede estar el método
+    llamado, según el tipo del receptor. Así facturacionService.consultar() enlaza
+    con FacturacionService (y sus implementaciones) y no con cualquier método del
+    repo que se llame consultar.
+
+    ponytail: inferencia por texto (campos, parámetros y locales declarados con su
+    tipo). Receptores sin tipo visible (lambdas, cadenas a().b(), var) quedan en
+    None y se enlazan por nombre como antes.
+    """
+    classes = [e for e in entities if e.type in ("Class", "Interface", "Enum", "Record")]
+    fields = [e for e in entities if e.type == "Field"]
+
+    for method in (e for e in entities if e.type == "Method"):
+        owners_of_file = [
+            c for c in classes
+            if c.file_path == method.file_path and c.start_line <= method.start_line <= c.end_line
+        ]
+        if not owners_of_file:
+            continue
+        owner = min(owners_of_file, key=lambda c: c.end_line - c.start_line)
+        own_types = [owner.name] + [r.target_name for r in owner.relations if r.type == "EXTENDS"]
+        own_fields = "\n".join(
+            f.code for f in fields if f.file_path == owner.file_path and owner.start_line <= f.start_line <= owner.end_line
+        )
+
+        for relation in method.relations:
+            if relation.type != "CALLS":
+                continue
+            owners: set[str] = set()
+            for receiver in _receivers(method.code, relation.target_name):
+                if receiver is None:
+                    owners = set()
+                    break
+                if receiver in ("", "this"):
+                    owners.update(own_types)
+                elif receiver == "super":
+                    owners.update(own_types[1:])
+                else:
+                    declared = _declared_type(method.code, receiver) or _declared_type(own_fields, receiver)
+                    if declared:
+                        owners.add(declared)
+                    elif receiver[:1].isupper():
+                        owners.add(receiver)  # llamada estática: Clase.metodo()
+                    else:
+                        owners = set()
+                        break
+            relation.target_owners = sorted(owners) or None
+
+
+# ═══════════════════════════════════════════════════════════════
 # Endpoints HTTP (Spring MVC y JAX-RS)
 # ═══════════════════════════════════════════════════════════════
 

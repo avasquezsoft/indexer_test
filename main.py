@@ -318,6 +318,7 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                         all_tables |= code_links.add_sql_links(entities, resolve_sql)
                         if language == "java":
                             code_links.add_routes(entities)
+                            code_links.resolve_call_owners(entities)
                         _annotate_chunks(chunks, entities)
 
                     all_entities.extend(entities)

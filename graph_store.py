@@ -143,6 +143,7 @@ def upsert_entities(entities: list) -> list[dict]:
                 "rel_type": r.get("type", "CALLS"),
                 "target_name": r.get("target_name", ""),
                 "target_path": r.get("target_path"),
+                "target_owners": r.get("target_owners"),
                 "properties": r.get("properties", {}),
             })
 
@@ -182,12 +183,19 @@ def upsert_relations(rels: list[dict]) -> int:
     mismo archivo, CALLS solo a métodos, USES_SQL al .sql exacto, etc.).
     Devuelve cuántas se crearon.
 
-    ponytail: CALLS se resuelve por nombre de método, sin tipos. Si hay varios
-    métodos con el mismo nombre en el repo, se enlaza con todos.
+    CALLS usa target_owners (tipo del receptor, ver code_links.resolve_call_owners):
+    solo enlaza con métodos de esas clases o de las que las implementan/extienden.
+    Sin target_owners se enlaza por nombre con todos los métodos homónimos.
     """
     created = 0
+    # CALLS en una segunda pasada: su validación usa HAS_METHOD/IMPLEMENTS,
+    # que tienen que existir antes (dentro de una misma consulta no está garantizado).
+    groups = [
+        [r for r in rels if r["rel_type"] != "CALLS"],
+        [r for r in rels if r["rel_type"] == "CALLS"],
+    ]
     with get_driver().session() as session:
-        for i in range(0, len(rels), _REL_BATCH):
+        for group, i in ((g, i) for g in groups for i in range(0, len(g), _REL_BATCH)):
             record = session.run(
                 """
                 UNWIND $rels AS rel
@@ -198,7 +206,17 @@ def upsert_relations(rels: list[dict]) -> int:
                   AND CASE rel.rel_type
                         WHEN 'HAS_METHOD' THEN b.type IN ['Method', 'Function'] AND b.file_path = a.file_path
                         WHEN 'HAS_FIELD' THEN b.type = 'Field' AND b.file_path = a.file_path
-                        WHEN 'CALLS' THEN b.type IN ['Method', 'Function']
+                        WHEN 'CALLS' THEN b.type IN ['Method', 'Function'] AND b.language = a.language AND (
+                            rel.target_owners IS NULL
+                            OR EXISTS {
+                                MATCH (o:CodeEntity)-[:HAS_METHOD]->(b)
+                                WHERE o.name IN rel.target_owners
+                                   OR EXISTS {
+                                       MATCH (o)-[:IMPLEMENTS|EXTENDS]->(t:CodeEntity)
+                                       WHERE t.name IN rel.target_owners
+                                   }
+                            }
+                        )
                         WHEN 'USES_SQL' THEN b.type = 'SqlFile' AND b.file_path = rel.target_path
                         WHEN 'READS' THEN b.type = 'Table'
                         WHEN 'WRITES' THEN b.type = 'Table'
@@ -212,7 +230,7 @@ def upsert_relations(rels: list[dict]) -> int:
                 ) YIELD rel AS r
                 RETURN count(r) AS created
                 """,
-                rels=rels[i:i + _REL_BATCH],
+                rels=group[i:i + _REL_BATCH],
             ).single()
             created += record["created"] if record else 0
 

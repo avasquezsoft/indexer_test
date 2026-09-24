@@ -1,6 +1,6 @@
 """
 title: Tennis Doc Tools
-version: 1.2
+version: 1.3
 requirements: requests
 description: Acciones de Tennis Doc IA que el modelo puede llamar solo (function calling):
              explorar el código (buscar, leer archivos, quién usa qué, flujo hasta SQL y
@@ -536,8 +536,8 @@ class Tools:
             lines.append(line)
 
         lines.append(
-            "Nota: las llamadas se enlazan por nombre de método; si el nombre es muy "
-            "común puede haber coincidencias de otras clases."
+            "Nota: las llamadas se resuelven por el tipo del receptor; las que no se pudieron "
+            "inferir se enlazan por nombre y pueden incluir métodos homónimos de otras clases."
         )
 
         return self._cap("\n".join(lines))
@@ -644,7 +644,13 @@ class Tools:
 
         for r in usage:
 
-            line = f"- {r.get('access')} [{r.get('repo')}] {self._qualified(r.get('class'), r.get('method') or '?')}"
+            if not r.get("method"):
+
+                lines.append(f"- {r.get('access')} [{r.get('repo')}] en {r.get('sql_file')} (ningún método lo usa)")
+
+                continue
+
+            line = f"- {r.get('access')} [{r.get('repo')}] {self._qualified(r.get('class'), r.get('method'))}"
 
             if r.get("sql_file"):
 

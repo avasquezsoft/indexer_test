@@ -285,7 +285,7 @@ Cada chunk incluye `embed_text` enriquecido con metadatos del repo, rama, archiv
 - `USES_SQL` — método → archivo `.sql` que ejecuta (directo o vía constante)
 - `READS` / `WRITES` — `SqlFile` o método (SQL en strings) → `Table`
 
-Las relaciones se crean al final de la indexación, cuando ya existen todos los nodos del repo (`graph_store.upsert_relations`). El destino se busca por nombre dentro del mismo repo/rama y se valida su tipo: `HAS_METHOD`/`HAS_FIELD` solo dentro del mismo archivo, `CALLS` solo a métodos. `CALLS` no resuelve tipos: si varios métodos se llaman igual, se enlaza con todos. Las tablas, los SQL y las rutas HTTP se extraen con expresiones regulares (`code_links.py`).
+Las relaciones se crean al final de la indexación, cuando ya existen todos los nodos del repo (`graph_store.upsert_relations`). El destino se busca por nombre dentro del mismo repo/rama y se valida su tipo: `HAS_METHOD`/`HAS_FIELD` solo dentro del mismo archivo, `CALLS` solo a métodos. `CALLS` (Java) se resuelve por el tipo del receptor (`code_links.resolve_call_owners`): `servicio.metodo()` enlaza solo con métodos de la clase del campo/parámetro/variable `servicio` o de las clases que la implementan/extienden; `Clase.metodo()` con esa clase; `metodo()` con la propia clase. Si el tipo no se puede inferir (cadenas `a().b()`, lambdas) se enlaza por nombre con todos los homónimos del mismo lenguaje. Los `CALLS` se crean en una segunda pasada, después de `HAS_METHOD`/`IMPLEMENTS`. Las tablas, los SQL y las rutas HTTP se extraen con expresiones regulares (`code_links.py`).
 
 ### IDs
 Los IDs de entidad siguen el formato:

@@ -42,6 +42,9 @@ class Relation(BaseModel):
     target_type: str = "Unknown"
     # Si se conoce, el destino se busca por ruta además de por nombre (ej. un .sql)
     target_path: str | None = None
+    # CALLS: clases/interfaces donde puede estar el método llamado (tipo del receptor).
+    # None = desconocido: se enlaza por nombre en todo el repo.
+    target_owners: list[str] | None = None
     properties: dict = Field(default_factory=dict)
 
 

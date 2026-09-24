@@ -1,6 +1,6 @@
 """
 title: Tennis Doc RAG
-version: 3.4
+version: 3.5
 requirements: requests
 description: Filtro para Open WebUI que recupera contexto de código desde Tennis Doc IA.
 
@@ -625,7 +625,11 @@ class Filter:
                 "y tablas, uso de tablas y endpoints."
             ),
         )
-        graph_map_max_chars: int = 8000
+        graph_map_max_chars: int = 12000
+        endpoint_flows: int = Field(
+            default=5,
+            description="Al pedir endpoints, cuántos controllers incluir con su flujo hasta SQL/tablas.",
+        )
         flow_depth: int = Field(default=4, description="Saltos del flujo (1-6).")
         request_timeout: int = Field(default=45, description="Segundos por llamada.")
         repos_cache_seconds: int = 60
@@ -1811,7 +1815,13 @@ class Filter:
 
         for r in data.get("usage", []):
 
-            line = f"- {r.get('access')} por {self._qualified(r.get('class'), r.get('method') or '?')}"
+            if not r.get("method"):
+
+                lines.append(f"- {r.get('access')} en {r.get('sql_file')} (ningún método lo usa)")
+
+                continue
+
+            line = f"- {r.get('access')} por {self._qualified(r.get('class'), r.get('method'))}"
 
             if r.get("sql_file"):
 
@@ -1889,6 +1899,35 @@ class Filter:
         with ThreadPoolExecutor(max_workers=min(6, len(calls))) as pool:
 
             datas = list(pool.map(lambda c: self._graph_get(c[1], c[2]), calls))
+
+        # Endpoints: además de la lista, el flujo de cada controller hasta SQL y tablas.
+        controllers = []
+
+        for (_, endpoint, _, _), data in zip(calls, datas):
+
+            if endpoint == "/endpoints" and data:
+
+                controllers = list(
+                    dict.fromkeys(r["class"] for r in data.get("endpoints", []) if r.get("class"))
+                )[: self.valves.endpoint_flows]
+
+        if controllers:
+
+            flow_calls = [
+                (
+                    f"Flujo desde `{name}` (llamadas, SQL y tablas)",
+                    f"/graph/flow/{name}",
+                    {**scope, "depth": self.valves.flow_depth},
+                    self._fmt_flow,
+                )
+                for name in controllers
+            ]
+
+            with ThreadPoolExecutor(max_workers=len(flow_calls)) as pool:
+
+                datas += list(pool.map(lambda c: self._graph_get(c[1], c[2]), flow_calls))
+
+            calls += flow_calls
 
         sections = []
 
@@ -2035,16 +2074,41 @@ class Filter:
 
         return body
 
-    def _rag_prompt(self, scope, analysis, context, markdown_mode, repo_note, graph_map=""):
+    def _rag_prompt(self, scope, analysis, context, markdown_mode, repo_note, graph_map="", tools_on=False):
 
         hint = _STRATEGY_HINTS.get(analysis["strategy"], _STRATEGY_HINTS["code"])
 
-        output_rule = (
-            "5. Entrega un documento Markdown completo y bien estructurado "
-            "(títulos, tablas cuando aporten, bloques de código para snippets)."
-            if markdown_mode
-            else "5. Cita archivos como `ruta/Archivo.java` y usa snippets cortos "
-            "del contexto cuando ayuden."
+        if markdown_mode and tools_on:
+
+            output_rule = (
+                "5. El usuario quiere un archivo .md: redacta el documento Markdown completo "
+                "y entrégalo llamando a la herramienta export_markdown con ese documento en "
+                "`content`. El enlace de descarga lo agrega la herramienta; no lo inventes."
+            )
+
+        elif markdown_mode:
+
+            output_rule = (
+                "5. Entrega un documento Markdown completo y bien estructurado "
+                "(títulos, tablas cuando aporten, bloques de código para snippets). "
+                "El enlace de descarga del .md se agrega solo al final; no lo inventes."
+            )
+
+        else:
+
+            output_rule = (
+                "5. Cita archivos como `ruta/Archivo.java` y usa snippets cortos "
+                "del contexto cuando ayuden."
+            )
+
+        sources_rule = (
+            "8. La información del código está en el CONTEXTO y el MAPA DEL GRAFO. Si "
+            "necesitas más, usa solo las herramientas de Tennis Doc (search_code, "
+            "read_file, find_usages, get_call_flow, find_table_usage...); no busques "
+            "en archivos de conocimiento ni en la web."
+            if tools_on
+            else "8. La información del código está en el CONTEXTO y el MAPA DEL GRAFO; "
+            "no uses otras fuentes."
         )
 
         map_section = (
@@ -2070,8 +2134,9 @@ Reglas:
 7. El MAPA DEL GRAFO viene del análisis estático del código (quién llama a quién,
    qué SQL ejecuta, qué tablas lee/escribe, qué endpoint lo expone). Úsalo para
    explicar el flujo completo: endpoint → controller → service → DAO → SQL → tablas.
-   Las llamadas se enlazan por nombre de método: si el nombre es muy común,
-   confírmalo con el código antes de afirmarlo.
+   Las llamadas se resuelven por el tipo del receptor; solo las que no se pudieron
+   inferir se enlazan por nombre. Si un destino parece dudoso, confírmalo con el código.
+{sources_rule}
 {map_section}
 CONTEXTO
 ========
@@ -2593,6 +2658,15 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
             query, _MD_WORD_RE, _MD_EXPLICIT_RE, allow_entities=True
         )
 
+        tools_on = self._tools_active(body, metadata)
+
+        if markdown_mode:
+
+            self._log(
+                "Pedido de Markdown: "
+                + ("lo entrega la Tool (export_markdown)" if tools_on else "se adjunta el .md al final")
+            )
+
         # -------------------------------------------------
         # REPO / RAMA / SEGUIMIENTO
         # -------------------------------------------------
@@ -2674,7 +2748,7 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
 
         self._inject_system(
             body,
-            self._rag_prompt(scope, analysis, context, markdown_mode, repo_note, graph_map),
+            self._rag_prompt(scope, analysis, context, markdown_mode, repo_note, graph_map, tools_on),
         )
 
         self._emit_citations(used)
@@ -2682,7 +2756,7 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
         self._log(f"Contexto inyectado: {len(used)} fragmentos | {len(context)} chars")
 
         # Con la Tool activa, el modelo usa export_markdown; si no, lo adjunta outlet().
-        if markdown_mode and not self._tools_active(body, metadata):
+        if markdown_mode and not tools_on:
 
             key = (metadata or {}).get("chat_id") or body.get("chat_id") or "_default"
 
