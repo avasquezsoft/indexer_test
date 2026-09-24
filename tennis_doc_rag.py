@@ -1,6 +1,6 @@
 """
 title: Tennis Doc RAG
-version: 3.2
+version: 3.3
 requirements: requests
 description: Filtro para Open WebUI que recupera contexto de código desde Tennis Doc IA.
 
@@ -20,6 +20,8 @@ inlet()  ── comandos (repos, indexar, grafo, pdf)  ──> resultado exacto 
     |       /graph/entity/{n}   entidad completa + relaciones
     |       /search-clone       si se nombra una clase/método: su archivo real
     |                           desde el clon (condensado si es muy grande)
+    |       mapa del grafo      quién usa, flujo (llamadas → SQL → tablas),
+    |                           uso de tablas y endpoints HTTP
     |   luego, si aún falta contexto:
     |       /search-clone       fallback por keywords
     |
@@ -314,6 +316,38 @@ _FOLLOWUP_RE = re.compile(
 )
 
 # ----------------------------------------------------------------
+# Intenciones sobre el grafo (texto normalizado)
+# ----------------------------------------------------------------
+
+# "¿dónde se usa X?", "¿quién llama a X?", "usado por", "usos de"
+_USAGES_RE = re.compile(
+    r"\b(?:donde|quien(?:es)?|que\s+(?:clases?|metodos?|servicios?))\s+(?:se\s+)?"
+    r"(?:usa|usan|llama|llaman|invoca\w*|utiliza\w*|referencia\w*|inyecta\w*|consume\w*)\b"
+    r"|\busad[oa]s?\s+(?:por|en)\b|\busos?\s+de\b|\breferencias?\s+(?:a|de)\b"
+    r"|\bwho\s+(?:calls|uses)\b|\bcallers?\b|\busages?\b"
+)
+
+_ENDPOINTS_RE = re.compile(
+    r"\bendpoints?\b|\bservicios?\s+rest\b|\bapis?\s+(?:rest|expuestas?)\b"
+    r"|\brutas?\s+(?:http|rest|expuestas?)\b|\burls?\s+(?:expuestas?|del\s+servicio)\b"
+)
+
+# "¿qué tablas usa este repo?" (sin nombrar una tabla concreta)
+_TABLES_LIST_RE = re.compile(
+    r"\b(?:que|cuales|lista\w*|todas\s+las)\s+(?:\w+\s+){0,2}?tablas\b"
+    r"|\btablas\s+(?:usa|usan|utiliza\w*|toca\w*|consulta\w*)\b"
+)
+
+# Tabla nombrada: "tabla FACTURA" o un nombre en MAYUSCULAS_CON_GUION
+_TABLE_WORD_RE = re.compile(r"\btablas?\s+[`'\"]?([A-Za-z_][\w$#]*)", re.IGNORECASE)
+_UPPER_SNAKE_RE = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b(?!\.sql)")
+
+_TABLE_STOP = {
+    "de", "del", "la", "las", "el", "los", "que", "donde", "en", "se", "y", "o",
+    "con", "por", "para", "usa", "usan", "a", "al",
+}
+
+# ----------------------------------------------------------------
 # Tipo de consulta (texto original)
 # ----------------------------------------------------------------
 
@@ -503,6 +537,10 @@ _STRATEGY_HINTS = {
         "Identifica la query, tablas, DAO/Repository, procedimientos "
         "almacenados y el método Java que los usa."
     ),
+    "usages": (
+        "Lista quién usa o llama a la entidad (clase, método y archivo) según el "
+        "MAPA DEL GRAFO, y explica brevemente para qué la usa cada uno."
+    ),
     "code": "Explica qué hace el código relevante y dónde está.",
     "semantic": "Explica qué hace el código relevante y dónde está.",
 }
@@ -571,6 +609,15 @@ class Filter:
                 "grandes se condensan (firmas + métodos relevantes completos)."
             ),
         )
+        graph_map: bool = Field(
+            default=True,
+            description=(
+                "Agregar el mapa del grafo: quién usa la entidad, flujo hasta SQL "
+                "y tablas, uso de tablas y endpoints."
+            ),
+        )
+        graph_map_max_chars: int = 8000
+        flow_depth: int = Field(default=4, description="Saltos del flujo (1-6).")
         request_timeout: int = Field(default=45, description="Segundos por llamada.")
         repos_cache_seconds: int = 60
 
@@ -953,21 +1000,48 @@ class Filter:
     # ANÁLISIS DE LA CONSULTA
     # ========================================================
 
+    def _extract_tables(self, query):
+
+        tables = []
+
+        for name in _TABLE_WORD_RE.findall(query):
+
+            if name.lower() not in _TABLE_STOP and len(name) >= 3:
+
+                tables.append(name.upper())
+
+        tables.extend(t.upper() for t in _UPPER_SNAKE_RE.findall(query))
+
+        return list(dict.fromkeys(tables))[:3]
+
     def _analyze_query(self, query):
 
-        entities = self._extract_entities(query)
+        # "org/repo" no es una clase: se quita antes de buscar entidades.
+        clean = _REPO_RE.sub(" ", query)
 
-        methods = self._extract_methods(query)
+        norm = _normalize(query)
 
-        is_sql = bool(_SQL_RE.search(query))
+        tables = self._extract_tables(clean)
+
+        entities = [e for e in self._extract_entities(clean) if e.upper() not in tables]
+
+        methods = self._extract_methods(clean)
+
+        is_sql = bool(_SQL_RE.search(query)) or bool(tables)
 
         is_architecture = bool(_ARCHITECTURE_RE.search(query))
 
         is_code = bool(_CODE_RE.search(query))
 
+        wants_usages = bool(_USAGES_RE.search(norm))
+
         if is_architecture:
 
             strategy = "architecture"
+
+        elif wants_usages and (entities or methods):
+
+            strategy = "usages"
 
         elif entities or methods:
 
@@ -992,6 +1066,10 @@ class Filter:
             "is_sql": is_sql,
             "is_architecture": is_architecture,
             "is_code": is_code,
+            "tables": tables,
+            "wants_usages": wants_usages,
+            "wants_endpoints": bool(_ENDPOINTS_RE.search(norm)),
+            "wants_tables": bool(_TABLES_LIST_RE.search(norm)) and not tables,
         }
 
     def _enrich_query(self, query, analysis):
@@ -1550,7 +1628,7 @@ class Filter:
 
         search_query = self._enrich_query(retrieval_query or query, analysis)
 
-        use_graph = analysis["strategy"] in {"architecture", "entity", "code", "sql"}
+        use_graph = analysis["strategy"] in {"architecture", "entity", "usages", "code", "sql"}
 
         entity_names = analysis["entities"]
 
@@ -1565,7 +1643,9 @@ class Filter:
         # en paralelo: el índice puede tener la clase partida o truncada.
         named = bool(repo and (entity_names or analysis["methods"]))
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+
+            fut_map = pool.submit(self._graph_map, repo, branch, analysis)
 
             fut_aug = pool.submit(self._search_augmented, repo, branch, search_query, errors)
 
@@ -1596,6 +1676,8 @@ class Filter:
             if fut_entities:
 
                 lists["entity"], lists["relation"] = fut_entities.result()
+
+            graph_map = fut_map.result()
 
             if fut_clone:
 
@@ -1639,10 +1721,185 @@ class Filter:
 
         self._log(
             f"Contexto final: {len(fused)} fragmentos "
-            f"| {sum(len(r['text']) for r in fused)} chars"
+            f"| {sum(len(r['text']) for r in fused)} chars | mapa {len(graph_map)} chars"
         )
 
-        return fused, errors
+        return fused, errors, graph_map
+
+    # ========================================================
+    # MAPA DEL GRAFO (quién usa, flujo, tablas, endpoints)
+    # ========================================================
+
+    def _graph_get(self, endpoint, params):
+
+        try:
+
+            response = self._get(
+                endpoint,
+                params={k: v for k, v in params.items() if v not in (None, "")},
+                timeout=20,
+            )
+
+            if response.status_code != 200:
+
+                return None
+
+            return response.json()
+
+        except Exception as exc:
+
+            self._log(f"Error {endpoint}: {exc}")
+
+            return None
+
+    @staticmethod
+    def _qualified(owner, name):
+
+        return f"{owner}.{name}" if owner else str(name)
+
+    def _fmt_usages(self, data):
+
+        lines = []
+
+        for r in data.get("usages", []):
+
+            line = (
+                f"- {self._qualified(r.get('source_class'), r.get('source_name'))} "
+                f"→ {r.get('rel_type')} → {r.get('target_name')} "
+                f"({r.get('file_path')}:{r.get('start_line')})"
+            )
+
+            if r.get("route"):
+
+                line += f" [endpoint {r['route']}]"
+
+            lines.append(line)
+
+        return lines
+
+    def _fmt_flow(self, data):
+
+        lines = []
+
+        for r in data.get("edges", []):
+
+            line = (
+                f"- {self._qualified(r.get('source_class'), r.get('source'))} "
+                f"→ {r.get('rel_type')} → {self._qualified(r.get('target_class'), r.get('target'))}"
+            )
+
+            if r.get("rel_type") == "USES_SQL" and r.get("target_file"):
+
+                line += f" ({r['target_file']})"
+
+            lines.append(line)
+
+        return lines
+
+    def _fmt_table(self, data):
+
+        lines = []
+
+        for r in data.get("usage", []):
+
+            line = f"- {r.get('access')} por {self._qualified(r.get('class'), r.get('method') or '?')}"
+
+            if r.get("sql_file"):
+
+                line += f" vía {r['sql_file']}"
+
+            if r.get("file_path"):
+
+                line += f" ({r['file_path']})"
+
+            if r.get("route"):
+
+                line += f" [endpoint {r['route']}]"
+
+            lines.append(line)
+
+        return lines
+
+    def _fmt_endpoints(self, data):
+
+        return [
+            f"- {r.get('route')} → {self._qualified(r.get('class'), r.get('method'))} "
+            f"({r.get('file_path')}:{r.get('start_line')})"
+            for r in data.get("endpoints", [])
+        ]
+
+    def _fmt_tables(self, data):
+
+        return [
+            f"- {r.get('table')}: {r.get('readers', 0)} lecturas, {r.get('writers', 0)} escrituras"
+            for r in data.get("tables", [])
+        ]
+
+    def _graph_map(self, repo, branch, analysis):
+        """Relaciones reales del código, en texto compacto para el prompt."""
+
+        if not self.valves.graph_map:
+
+            return ""
+
+        scope = {"repo": repo, "branch": branch}
+
+        calls = []
+
+        for name in (analysis["entities"] or analysis["methods"])[:2]:
+
+            calls.append(
+                (f"Quién usa `{name}`", f"/graph/usages/{name}", {**scope, "limit": 40}, self._fmt_usages)
+            )
+
+            calls.append(
+                (
+                    f"Flujo desde `{name}` (llamadas, SQL y tablas)",
+                    f"/graph/flow/{name}",
+                    {**scope, "depth": self.valves.flow_depth},
+                    self._fmt_flow,
+                )
+            )
+
+        for table in analysis["tables"]:
+
+            calls.append((f"Uso de la tabla `{table}`", f"/sql/table/{table}", scope, self._fmt_table))
+
+        if repo and analysis["wants_endpoints"]:
+
+            calls.append(("Endpoints HTTP del repositorio", "/endpoints", scope, self._fmt_endpoints))
+
+        if repo and analysis["wants_tables"]:
+
+            calls.append(("Tablas que usa el repositorio", "/sql/tables", scope, self._fmt_tables))
+
+        if not calls:
+
+            return ""
+
+        with ThreadPoolExecutor(max_workers=min(6, len(calls))) as pool:
+
+            datas = list(pool.map(lambda c: self._graph_get(c[1], c[2]), calls))
+
+        sections = []
+
+        for (title, _, _, fmt), data in zip(calls, datas):
+
+            lines = fmt(data) if data else []
+
+            if lines:
+
+                sections.append(f"### {title}\n" + "\n".join(dict.fromkeys(lines)))
+
+        text = "\n\n".join(sections)
+
+        if len(text) > self.valves.graph_map_max_chars:
+
+            text = text[: self.valves.graph_map_max_chars] + "\n… (mapa truncado)"
+
+        self._log(f"Mapa del grafo: {len(sections)} secciones | {len(text)} chars")
+
+        return text
 
     # ========================================================
     # CONSTRUIR CONTEXTO
@@ -1661,10 +1918,10 @@ class Filter:
 
         return (result.get("language") or "").lower()
 
-    def _build_context(self, results):
-        """Devuelve (texto_contexto, resultados_incluidos)."""
+    def _build_context(self, results, reserve=0):
+        """Devuelve (texto_contexto, resultados_incluidos). reserve: chars ya usados (mapa)."""
 
-        budget = int(self.valves.max_context_tokens * self.valves.chars_per_token)
+        budget = int(self.valves.max_context_tokens * self.valves.chars_per_token) - reserve
 
         parts = []
 
@@ -1769,7 +2026,7 @@ class Filter:
 
         return body
 
-    def _rag_prompt(self, scope, analysis, context, markdown_mode, repo_note):
+    def _rag_prompt(self, scope, analysis, context, markdown_mode, repo_note, graph_map=""):
 
         hint = _STRATEGY_HINTS.get(analysis["strategy"], _STRATEGY_HINTS["code"])
 
@@ -1779,6 +2036,10 @@ class Filter:
             if markdown_mode
             else "5. Cita archivos como `ruta/Archivo.java` y usa snippets cortos "
             "del contexto cuando ayuden."
+        )
+
+        map_section = (
+            f"\nMAPA DEL GRAFO\n==============\n\n{graph_map}\n" if graph_map else ""
         )
 
         return f"""
@@ -1797,7 +2058,12 @@ Reglas:
 4. {hint}
 {output_rule}
 6. Termina con "### Fuentes": los archivos que usaste, sin inventar ninguno.
-
+7. El MAPA DEL GRAFO viene del análisis estático del código (quién llama a quién,
+   qué SQL ejecuta, qué tablas lee/escribe, qué endpoint lo expone). Úsalo para
+   explicar el flujo completo: endpoint → controller → service → DAO → SQL → tablas.
+   Las llamadas se enlazan por nombre de método: si el nombre es muy común,
+   confírmalo con el código antes de afirmarlo.
+{map_section}
 CONTEXTO
 ========
 
@@ -1923,9 +2189,13 @@ y sugiere reformular mencionando la clase, el método o el repositorio
 
             lines.append(f"**Firma:** `{entity['signature']}`")
 
+        if entity.get("route"):
+
+            lines.append(f"**Endpoint:** `{entity['route']}`")
+
         lines.append("")
 
-        relations = entity.get("relations") or []
+        relations = [r for r in entity.get("relations") or [] if r.get("rel_type")]
 
         if relations:
 
@@ -1942,6 +2212,21 @@ y sugiere reformular mencionando la clase, el método o el repositorio
         else:
 
             lines.append("No se encontraron relaciones directas.")
+
+        used_by = [r for r in entity.get("used_by") or [] if r.get("rel_type")]
+
+        if used_by:
+
+            lines.append("")
+
+            lines.append("### Usado por")
+
+            for relation in used_by:
+
+                lines.append(
+                    f"- `{relation.get('source_name', '?')}` "
+                    f"({relation.get('source_type', '?')}) **{relation.get('rel_type')}**"
+                )
 
         return self._command_reply(body, metadata, "\n".join(lines))
 
@@ -2307,6 +2592,8 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
 
                 analysis["methods"] = prev_analysis["methods"]
 
+                analysis["tables"] = analysis["tables"] or prev_analysis["tables"]
+
                 if analysis["strategy"] == "semantic":
 
                     analysis["strategy"] = prev_analysis["strategy"]
@@ -2325,21 +2612,21 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
         # RAG
         # -------------------------------------------------
 
-        results, errors = self._fetch_context(repo, branch, query, analysis, retrieval_query)
+        results, errors, graph_map = self._fetch_context(repo, branch, query, analysis, retrieval_query)
 
-        if not results:
+        if not results and not graph_map:
 
             self._log("No se recuperó contexto")
 
             return self._inject_system(body, self._no_context_prompt(repo, errors, repo_note))
 
-        context, used = self._build_context(results)
+        context, used = self._build_context(results, reserve=len(graph_map))
 
         scope = f"repositorio `{repo}`, rama `{branch}`" if repo else f"todos los repos, rama `{branch}`"
 
         self._inject_system(
             body,
-            self._rag_prompt(scope, analysis, context, markdown_mode, repo_note),
+            self._rag_prompt(scope, analysis, context, markdown_mode, repo_note, graph_map),
         )
 
         self._emit_citations(used)

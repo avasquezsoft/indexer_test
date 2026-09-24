@@ -36,14 +36,20 @@ class Relation(BaseModel):
     type: Literal[
         "EXTENDS", "IMPLEMENTS", "HAS_METHOD", "HAS_FIELD",
         "CALLS", "IMPORTS", "ANNOTATED_WITH", "INJECTED",
+        "USES_SQL", "READS", "WRITES",
     ]
     target_name: str
     target_type: str = "Unknown"
+    # Si se conoce, el destino se busca por ruta además de por nombre (ej. un .sql)
+    target_path: str | None = None
     properties: dict = Field(default_factory=dict)
 
 
 class GraphEntity(BaseModel):
-    type: Literal["Class", "Interface", "Method", "Field", "Annotation", "Function", "Struct", "Enum"]
+    type: Literal[
+        "Class", "Interface", "Method", "Field", "Annotation", "Function", "Struct", "Enum", "Record",
+        "SqlFile", "Table",
+    ]
     name: str
     file_path: str
     repo: str
@@ -56,6 +62,8 @@ class GraphEntity(BaseModel):
     code: str
     annotations: list[str] = Field(default_factory=list)
     relations: list[Relation] = Field(default_factory=list)
+    # Endpoint HTTP que expone un método, ej. "GET /facturas/{id}"
+    route: str | None = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -366,14 +374,19 @@ def _extract_java_treesitter(source: str, tree, repo: str, branch: str, file_pat
                             docstring=_extract_docstring(source, child),
                             code=_node_text(source, child),
                         )
-                        # Llamadas
-                        for call in child.children:
-                            if call.type == "method_invocation":
-                                func = _child_by_type(call, "identifier")
-                                if func:
-                                    ment.relations.append(Relation(
-                                        type="CALLS", target_name=_node_text(source, func), target_type="Method"
-                                    ))
+                        # Llamadas: están anidadas en el cuerpo; en obj.metodo() el
+                        # nombre es el campo "name", no el primer identificador (obj)
+                        called = []
+                        stack = [child]
+                        while stack:
+                            node = stack.pop()
+                            if node.type == "method_invocation":
+                                func = node.child_by_field_name("name")
+                                if func and _node_text(source, func) not in called:
+                                    called.append(_node_text(source, func))
+                            stack.extend(node.children)
+                        for name in called:
+                            ment.relations.append(Relation(type="CALLS", target_name=name, target_type="Method"))
                         entities.append(ment)
                         cls_ent.relations.append(Relation(
                             type="HAS_METHOD", target_name=mname, target_type="Method"
@@ -700,6 +713,8 @@ def _build_embed_text(ent: GraphEntity) -> str:
         parts.append(f"Documentation: {ent.docstring}")
     if ent.annotations:
         parts.append(f"Annotations: {', '.join(ent.annotations)}")
+    if ent.route:
+        parts.append(f"Endpoint: {ent.route}")
     for rel in ent.relations[:_MAX_RELATIONS_IN_EMBED]:
         parts.append(f"{rel.type} {rel.target_type} {rel.target_name}")
     if len(ent.relations) > _MAX_RELATIONS_IN_EMBED:

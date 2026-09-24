@@ -1,9 +1,10 @@
 """
 title: Tennis Doc Tools
-version: 1.0
+version: 1.1
 requirements: requests
 description: Acciones de Tennis Doc IA que el modelo puede llamar solo (function calling):
-             listar/verificar repos indexados, indexar, ver el grafo de una clase y exportar a PDF.
+             explorar el código (buscar, leer archivos, quién usa qué, flujo hasta SQL y
+             tablas, endpoints), listar/verificar repos, indexar, ver el grafo y exportar a PDF.
 
 Uso
 ===
@@ -13,6 +14,11 @@ Uso
    si el modelo lo soporta (Qwen 2.5+, Llama 3.1+, GPT-4o, etc.).
 3. Cuando la Tool está activa en un chat, el filtro desactiva sus comandos por texto
    automáticamente, así no se ejecuta nada dos veces.
+
+Exploración
+===========
+Con estas funciones el modelo puede investigar en varios pasos: buscar la clase,
+leer el archivo, ver quién la llama y seguir el flujo hasta el SQL y las tablas.
 """
 
 import base64
@@ -44,6 +50,10 @@ class Tools:
         default_branch: str = Field(
             default_factory=lambda: os.environ.get("TENNIS_DOC_DEFAULT_BRANCH", "prod"),
             description="Rama por defecto.",
+        )
+
+        max_output_chars: int = Field(
+            default=30000, description="Máximo de caracteres que devuelve cada función."
         )
 
     def __init__(self):
@@ -101,6 +111,38 @@ class Tools:
                 repos.append({"name": str(name), "branch": branch})
 
         return sorted(repos, key=lambda r: r["name"].lower())
+
+    def _get_json(self, endpoint, params=None, timeout=30):
+
+        response = requests.get(
+            self._url(endpoint),
+            params={k: v for k, v in (params or {}).items() if v not in (None, "")},
+            headers=self._headers(),
+            timeout=timeout,
+        )
+
+        if response.status_code == 404:
+
+            return None
+
+        response.raise_for_status()
+
+        return response.json()
+
+    def _cap(self, text):
+
+        limit = self.valves.max_output_chars
+
+        if len(text) <= limit:
+
+            return text
+
+        return text[:limit] + f"\n… (recortado: {len(text)} caracteres en total)"
+
+    @staticmethod
+    def _qualified(owner, name):
+
+        return f"{owner}.{name}" if owner else str(name)
 
     @staticmethod
     async def _status(emitter, description, done=False):
@@ -294,7 +336,11 @@ class Tools:
 
             lines.append(f"Firma: {data['signature']}")
 
-        relations = data.get("relations") or []
+        if data.get("route"):
+
+            lines.append(f"Endpoint: {data['route']}")
+
+        relations = [r for r in data.get("relations") or [] if r.get("rel_type")]
 
         if relations:
 
@@ -311,7 +357,384 @@ class Tools:
 
             lines.append("Sin relaciones directas.")
 
+        used_by = [r for r in data.get("used_by") or [] if r.get("rel_type")]
+
+        if used_by:
+
+            lines.append("Usado por:")
+
+            for relation in used_by:
+
+                lines.append(
+                    f"- {relation.get('source_name', '?')} ({relation.get('source_type', '?')}) "
+                    f"{relation.get('rel_type')}"
+                )
+
         return "\n".join(lines)
+
+    async def search_code(
+        self,
+        question: str,
+        repo: str = "",
+        branch: str = "",
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Busca en el código indexado (búsqueda semántica + grafo) y devuelve los
+        fragmentos más relevantes con su archivo. Úsala para encontrar dónde está
+        implementado algo cuando no sabes el nombre exacto de la clase o método.
+
+        :param question: Qué buscar, en lenguaje natural o con nombres de clases/métodos.
+        :param repo: Repositorio "organizacion/repositorio" (recomendado).
+        :param branch: Rama (opcional).
+        """
+
+        await self._status(__event_emitter__, f"🔎 Buscando: {question[:60]}…")
+
+        try:
+
+            response = requests.post(
+                self._url("/search-graph"),
+                json={"query": question, "repo": repo or None, "branch": branch or None, "limit": 8},
+                headers=self._headers(),
+                timeout=60,
+            )
+
+            response.raise_for_status()
+
+            results = response.json().get("results", [])
+
+        except Exception as exc:
+
+            await self._status(__event_emitter__, "Error en la búsqueda", True)
+
+            return f"ERROR buscando en el código: {exc}"
+
+        await self._status(__event_emitter__, f"{len(results)} resultados", True)
+
+        if not results:
+
+            return "Sin resultados. Prueba con otros términos o con el nombre de la clase."
+
+        blocks = []
+
+        for r in results:
+
+            title = r.get("file_path", "?")
+
+            if r.get("ast_name"):
+
+                title += f" · {r.get('ast_type', '')} {r['ast_name']}"
+
+            text = (r.get("text") or "")[:2500]
+
+            blocks.append(f"### {title}\n{text}")
+
+        return self._cap("\n\n".join(blocks))
+
+    async def read_file(
+        self,
+        repo: str,
+        file_path: str,
+        branch: str = "",
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Lee el contenido completo de un archivo del repositorio (código, SQL, XML,
+        properties...). Úsala cuando necesites ver un archivo entero, por ejemplo
+        el .sql que ejecuta un DAO o la clase completa de un servicio.
+
+        :param repo: Repositorio "organizacion/repositorio".
+        :param file_path: Ruta del archivo dentro del repo, ej. src/main/java/.../FacturaDao.java
+        :param branch: Rama (opcional; por defecto la configurada).
+        """
+
+        await self._status(__event_emitter__, f"📄 Leyendo {file_path}…")
+
+        try:
+
+            response = requests.post(
+                self._url("/fetch-file"),
+                json={
+                    "repo": repo,
+                    "file_path": file_path.strip().strip("`"),
+                    "branch": branch or self.valves.default_branch,
+                },
+                headers=self._headers(),
+                timeout=60,
+            )
+
+            response.raise_for_status()
+
+            content = response.json().get("content") or ""
+
+        except Exception as exc:
+
+            await self._status(__event_emitter__, "No se pudo leer el archivo", True)
+
+            return f"ERROR leyendo {file_path}: {exc}"
+
+        await self._status(__event_emitter__, "Archivo leído", True)
+
+        return self._cap(f"Archivo: {file_path}\n\n{content}")
+
+    async def find_usages(
+        self,
+        name: str,
+        repo: str = "",
+        branch: str = "",
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Dice quién usa una clase, método o tabla: qué métodos la llaman, qué clases
+        la inyectan o heredan de ella, y qué endpoint expone a quien la llama.
+        Úsala para "¿dónde se usa X?", "¿quién llama a X?" o "¿qué impacto tiene cambiar X?".
+
+        :param name: Nombre exacto de la clase, método o tabla.
+        :param repo: Repositorio "organizacion/repositorio" (opcional).
+        :param branch: Rama (opcional).
+        """
+
+        await self._status(__event_emitter__, f"🔗 Buscando usos de {name}…")
+
+        try:
+
+            data = self._get_json(
+                f"/graph/usages/{name.strip().strip('`')}",
+                {"repo": repo, "branch": branch, "limit": 150},
+            )
+
+        except Exception as exc:
+
+            await self._status(__event_emitter__, "Error buscando usos", True)
+
+            return f"ERROR buscando usos de {name}: {exc}"
+
+        usages = (data or {}).get("usages", [])
+
+        await self._status(__event_emitter__, f"{len(usages)} usos", True)
+
+        if not usages:
+
+            return f"No se encontraron usos de {name} en el grafo."
+
+        lines = [f"Usos de {name} ({len(usages)}):"]
+
+        for r in usages:
+
+            line = (
+                f"- {self._qualified(r.get('source_class'), r.get('source_name'))} "
+                f"{r.get('rel_type')} {r.get('target_name')} "
+                f"({r.get('file_path')}:{r.get('start_line')})"
+            )
+
+            if r.get("route"):
+
+                line += f" [endpoint {r['route']}]"
+
+            lines.append(line)
+
+        lines.append(
+            "Nota: las llamadas se enlazan por nombre de método; si el nombre es muy "
+            "común puede haber coincidencias de otras clases."
+        )
+
+        return self._cap("\n".join(lines))
+
+    async def get_call_flow(
+        self,
+        name: str,
+        repo: str = "",
+        branch: str = "",
+        depth: int = 4,
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Muestra el flujo hacia abajo desde una clase o método: qué métodos llama,
+        qué dependencias inyecta, qué archivos SQL ejecuta y qué tablas lee o escribe.
+        Úsala para explicar "cómo funciona" un proceso de punta a punta.
+
+        :param name: Nombre exacto de la clase o método de inicio (ej. un Controller).
+        :param repo: Repositorio "organizacion/repositorio" (opcional).
+        :param branch: Rama (opcional).
+        :param depth: Cuántos saltos seguir (1 a 6).
+        """
+
+        await self._status(__event_emitter__, f"🧭 Siguiendo el flujo de {name}…")
+
+        try:
+
+            data = self._get_json(
+                f"/graph/flow/{name.strip().strip('`')}",
+                {"repo": repo, "branch": branch, "depth": depth},
+                timeout=60,
+            )
+
+        except Exception as exc:
+
+            await self._status(__event_emitter__, "Error obteniendo el flujo", True)
+
+            return f"ERROR obteniendo el flujo de {name}: {exc}"
+
+        edges = (data or {}).get("edges", [])
+
+        await self._status(__event_emitter__, f"{len(edges)} pasos", True)
+
+        if not edges:
+
+            return f"No se encontró flujo desde {name} en el grafo."
+
+        lines = [f"Flujo desde {name}:"]
+
+        for r in edges:
+
+            line = (
+                f"- {self._qualified(r.get('source_class'), r.get('source'))} "
+                f"{r.get('rel_type')} {self._qualified(r.get('target_class'), r.get('target'))}"
+            )
+
+            if r.get("rel_type") == "USES_SQL" and r.get("target_file"):
+
+                line += f" ({r['target_file']})"
+
+            lines.append(line)
+
+        return self._cap("\n".join(lines))
+
+    async def find_table_usage(
+        self,
+        table: str,
+        repo: str = "",
+        branch: str = "",
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Dice qué archivos SQL y qué métodos (con su clase) leen o escriben una tabla
+        de base de datos. Úsala para "¿quién usa la tabla X?" o "¿dónde se inserta en X?".
+
+        :param table: Nombre de la tabla, ej. FACTURA o dbo.FACTURA.
+        :param repo: Repositorio "organizacion/repositorio" (opcional: sin él busca en todos).
+        :param branch: Rama (opcional).
+        """
+
+        table = table.strip().split(".")[-1].strip("`[]\" ")
+
+        await self._status(__event_emitter__, f"🗃️ Buscando uso de la tabla {table}…")
+
+        try:
+
+            data = self._get_json(f"/sql/table/{table}", {"repo": repo, "branch": branch})
+
+        except Exception as exc:
+
+            await self._status(__event_emitter__, "Error consultando la tabla", True)
+
+            return f"ERROR consultando la tabla {table}: {exc}"
+
+        usage = (data or {}).get("usage", [])
+
+        await self._status(__event_emitter__, f"{len(usage)} usos", True)
+
+        if not usage:
+
+            return f"No se encontró uso de la tabla {table.upper()} en el grafo."
+
+        lines = [f"Uso de la tabla {table.upper()}:"]
+
+        for r in usage:
+
+            line = f"- {r.get('access')} [{r.get('repo')}] {self._qualified(r.get('class'), r.get('method') or '?')}"
+
+            if r.get("sql_file"):
+
+                line += f" vía {r['sql_file']}"
+
+            if r.get("file_path"):
+
+                line += f" ({r['file_path']})"
+
+            if r.get("route"):
+
+                line += f" [endpoint {r['route']}]"
+
+            lines.append(line)
+
+        return self._cap("\n".join(lines))
+
+    async def list_tables(
+        self,
+        repo: str,
+        branch: str = "",
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Lista las tablas de base de datos que usa un repositorio, con cuántos
+        SQL/métodos las leen y cuántos las escriben.
+
+        :param repo: Repositorio "organizacion/repositorio".
+        :param branch: Rama (opcional).
+        """
+
+        try:
+
+            data = self._get_json("/sql/tables", {"repo": repo, "branch": branch})
+
+        except Exception as exc:
+
+            return f"ERROR listando tablas de {repo}: {exc}"
+
+        tables = (data or {}).get("tables", [])
+
+        if not tables:
+
+            return f"No se encontraron tablas en {repo}."
+
+        lines = [f"Tablas de {repo} ({len(tables)}):"]
+
+        lines += [
+            f"- {r.get('table')}: {r.get('readers', 0)} lecturas, {r.get('writers', 0)} escrituras"
+            for r in tables
+        ]
+
+        return self._cap("\n".join(lines))
+
+    async def list_endpoints(
+        self,
+        repo: str,
+        branch: str = "",
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Lista los endpoints HTTP (Spring MVC / JAX-RS) que expone un repositorio,
+        con el controller y el método que atiende cada ruta.
+
+        :param repo: Repositorio "organizacion/repositorio".
+        :param branch: Rama (opcional).
+        """
+
+        try:
+
+            data = self._get_json("/endpoints", {"repo": repo, "branch": branch})
+
+        except Exception as exc:
+
+            return f"ERROR listando endpoints de {repo}: {exc}"
+
+        endpoints = (data or {}).get("endpoints", [])
+
+        if not endpoints:
+
+            return f"No se encontraron endpoints HTTP en {repo}."
+
+        lines = [f"Endpoints de {repo} ({len(endpoints)}):"]
+
+        lines += [
+            f"- {r.get('route')} → {self._qualified(r.get('class'), r.get('method'))} "
+            f"({r.get('file_path')}:{r.get('start_line')})"
+            for r in endpoints
+        ]
+
+        return self._cap("\n".join(lines))
 
     async def export_last_answer_pdf(
         self,

@@ -224,6 +224,11 @@ Los servicios internos se exponen entre sí por nombre de red Docker (ej: `http:
 | `POST` | `/search-graph` | Búsqueda híbrida vector + grafo + keyword |
 | `GET`  | `/graph/entity/{name}` | Busca entidad por nombre y devuelve relaciones |
 | `GET`  | `/graph/related/{entity_id}` | Vecinos en el grafo hasta cierta profundidad |
+| `GET`  | `/graph/usages/{name}` | Quién usa/llama/inyecta una clase, método o tabla |
+| `GET`  | `/graph/flow/{name}` | Flujo hacia abajo: llamadas → SQL → tablas (`depth` 1-6) |
+| `GET`  | `/sql/table/{table}` | Qué `.sql` y métodos leen o escriben una tabla |
+| `GET`  | `/sql/tables` | Tablas que usa un repo, con lectores/escritores |
+| `GET`  | `/endpoints` | Rutas HTTP (Spring MVC / JAX-RS) de un repo |
 | `POST` | `/fetch-file` | Trae contenido crudo de un archivo desde GitHub |
 | `POST` | `/pdf` | Genera PDF a partir de texto/markdown |
 | `POST` | `/markdown` | Genera archivo `.md` descargable |
@@ -264,7 +269,9 @@ Cada chunk incluye `embed_text` enriquecido con metadatos del repo, rama, archiv
 
 ### Nodos
 - Etiqueta: `:CodeEntity`
-- Propiedades: `id`, `name`, `type`, `language`, `repo`, `branch`, `file_path`, `start_line`, `end_line`, `signature`, `docstring`, `code`, `annotations`
+- Propiedades: `id`, `name`, `type`, `language`, `repo`, `branch`, `file_path`, `start_line`, `end_line`, `signature`, `docstring`, `code`, `annotations`, `route`
+- Tipos (`type`): los del código (`Class`, `Interface`, `Enum`, `Record`, `Method`, `Field`, `Function`, `Struct`) más `SqlFile` (un nodo por archivo `.sql`) y `Table` (nombre en mayúsculas, sin esquema)
+- `route`: endpoint HTTP del método, ej. `GET /api/facturas/{id}` (vacío si no es un endpoint)
 
 ### Relaciones
 - `EXTENDS` — herencia de clase
@@ -275,6 +282,10 @@ Cada chunk incluye `embed_text` enriquecido con metadatos del repo, rama, archiv
 - `IMPORTS` — importación de clase
 - `INJECTED` — inyección de dependencia (`@Autowired`, `@Inject`, `@Resource`)
 - `ANNOTATED_WITH` — anotación sobre entidad
+- `USES_SQL` — método → archivo `.sql` que ejecuta (directo o vía constante)
+- `READS` / `WRITES` — `SqlFile` o método (SQL en strings) → `Table`
+
+Las relaciones se crean al final de la indexación, cuando ya existen todos los nodos del repo (`graph_store.upsert_relations`). El destino se busca por nombre dentro del mismo repo/rama y se valida su tipo: `HAS_METHOD`/`HAS_FIELD` solo dentro del mismo archivo, `CALLS` solo a métodos. `CALLS` no resuelve tipos: si varios métodos se llaman igual, se enlaza con todos. Las tablas, los SQL y las rutas HTTP se extraen con expresiones regulares (`code_links.py`).
 
 ### IDs
 Los IDs de entidad siguen el formato:

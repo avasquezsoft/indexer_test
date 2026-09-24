@@ -20,6 +20,7 @@ from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upse
 from config import QDRANT_COLLECTION, WEBHOOK_SECRET, VECTOR_SIZE, JAVAPARSER_URL, INDEXER_API_KEY
 
 import ast_parser
+import code_links
 import graph_store
 import rag_engine
 import repo_clone
@@ -30,8 +31,6 @@ log = logging.getLogger(__name__)
 # Regex simple para validar formato org/repo
 _REPO_PATTERN = re.compile(r"^[\w.-]+/[\w.-]+$")
 
-# Detecta referencias a archivos .sql dentro de strings (Java, XML, properties, etc.)
-_SQL_REF_RE = re.compile(r'["\']([^"\']*\.sql)["\']', re.IGNORECASE)
 
 
 def _resolve_sql_path(java_file_path: str, sql_ref: str, all_file_paths: set[str]) -> str | None:
@@ -265,6 +264,13 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
         all_entities: list = []
         all_chunks: list = []
+        # Relaciones y tablas se crean al final, con todos los nodos ya guardados
+        pending_rels: list[dict] = []
+        all_tables: set[str] = set()
+
+        def resolve_sql(ref: str, source_path: str) -> str | None:
+            path = _resolve_sql_path(source_path, ref, all_file_paths)
+            return path if path in sql_files_map else None
 
         for file_info in files:
             attempt = 0
@@ -290,6 +296,12 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                         # Fallback: chunking clásico para lenguajes no soportados por AST
                         chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
                         entities = []
+                        if file_info["path"].lower().endswith(".sql"):
+                            sql_entity, tables = code_links.sql_file_entity(
+                                file_info["path"], content, full_repo_name, branch
+                            )
+                            entities = [sql_entity]
+                            all_tables |= tables
 
                     if not chunks:
                         log.warning(f"Sin chunks para {file_info['path']} (tamaño {len(content)} chars)")
@@ -302,6 +314,12 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                             chunks, read_sql, all_file_paths, sql_files_map
                         )
 
+                    if language:
+                        all_tables |= code_links.add_sql_links(entities, resolve_sql)
+                        if language == "java":
+                            code_links.add_routes(entities)
+                        _annotate_chunks(chunks, entities)
+
                     all_entities.extend(entities)
                     all_chunks.extend(chunks)
                     total_entities += len(entities)
@@ -309,7 +327,7 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
                     # Batch flush cada 500 entidades / 1000 chunks para no saturar memoria
                     if len(all_entities) >= 500:
-                        await _flush_to_graph(client, all_entities, all_chunks)
+                        pending_rels += await _flush_to_graph(client, all_entities, all_chunks)
                         total_chunks += len(all_chunks)
                         all_entities = []
                         all_chunks = []
@@ -332,8 +350,16 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
         # Flush final
         if all_entities or all_chunks:
-            await _flush_to_graph(client, all_entities, all_chunks)
+            pending_rels += await _flush_to_graph(client, all_entities, all_chunks)
             total_chunks += len(all_chunks)
+
+        # Relaciones al final: así ninguna se pierde por apuntar a un lote posterior
+        try:
+            if all_tables:
+                graph_store.upsert_entities(code_links.table_entities(all_tables, full_repo_name, branch))
+            graph_store.upsert_relations(pending_rels)
+        except Exception as exc:
+            log.error("Error creando relaciones en Neo4j: %s", exc)
 
         log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_entities} entidades, {total_chunks} chunks guardados")
         log.info("Archivos leídos: %d desde el clon, %d desde la API de GitHub", read_counts["clon"], read_counts["api"])
@@ -360,11 +386,12 @@ def _detect_language_from_path(file_path: str) -> str | None:
     return mapping.get(ext)
 
 
-async def _flush_to_graph(client, entities: list, chunks: list):
-    """Persiste entidades en Neo4j y chunks en Qdrant."""
+async def _flush_to_graph(client, entities: list, chunks: list) -> list[dict]:
+    """Persiste nodos en Neo4j y chunks en Qdrant. Devuelve las relaciones pendientes."""
+    rels: list[dict] = []
     if entities:
         try:
-            graph_store.upsert_entities(entities)
+            rels = graph_store.upsert_entities(entities)
         except Exception as exc:
             log.error("Error guardando entidades en Neo4j: %s", exc)
     if chunks:
@@ -374,6 +401,35 @@ async def _flush_to_graph(client, entities: list, chunks: list):
             upsert_chunks(client, QDRANT_COLLECTION, chunks, embeddings)
         except Exception as exc:
             log.error("Error guardando chunks en Qdrant: %s", exc)
+    return rels
+
+
+def _annotate_chunks(chunks: list[dict], entities: list) -> None:
+    """
+    Suma al texto de embedding el endpoint, los .sql y las tablas de cada entidad,
+    para que preguntas como "¿qué usa la tabla FACTURA?" o "endpoint /facturas"
+    encuentren el método por búsqueda vectorial.
+    """
+    by_id = {ast_parser._make_entity_id(e): e for e in entities}
+    for chunk in chunks:
+        entity = by_id.get(chunk["metadata"].get("entity_id"))
+        if entity is None:
+            continue
+        extra = []
+        if entity.route:
+            extra.append(f"Endpoint: {entity.route}")
+            chunk["metadata"]["route"] = entity.route
+        sql_files = [r.target_name for r in entity.relations if r.type == "USES_SQL"]
+        reads = [r.target_name for r in entity.relations if r.type == "READS"]
+        writes = [r.target_name for r in entity.relations if r.type == "WRITES"]
+        if sql_files:
+            extra.append(f"Uses SQL: {', '.join(sql_files)}")
+        if reads:
+            extra.append(f"Reads tables: {', '.join(reads)}")
+        if writes:
+            extra.append(f"Writes tables: {', '.join(writes)}")
+        if extra:
+            chunk["metadata"]["embed_text"] += "\n" + "\n".join(extra)
 
 
 def _inline_sql_references_ast(
@@ -386,7 +442,7 @@ def _inline_sql_references_ast(
     Si el SQL es muy grande se trunca para no romper los límites de embedding."""
     _MAX_INLINE_SQL_CHARS = 6000
     for chunk in chunks:
-        for match in _SQL_REF_RE.finditer(chunk["text"]):
+        for match in code_links.SQL_REF_RE.finditer(chunk["text"]):
             sql_ref = match.group(1)
             resolved = _resolve_sql_path(chunk["metadata"].get("file_path", ""), sql_ref, all_file_paths)
             if resolved and resolved in sql_files_map:
@@ -625,6 +681,61 @@ async def graph_related(entity_id: str, depth: int = 2):
         return {"entity_id": entity_id, "depth": depth, "related": related}
     except Exception as exc:
         log.error(f"Error obteniendo relaciones para {entity_id}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/graph/usages/{name}", dependencies=[Depends(verify_api_key)])
+async def graph_usages(name: str, repo: str | None = None, branch: str | None = None, limit: int = 100):
+    """Quién usa una clase/método/tabla: llamadas, inyecciones, herencia, SQL."""
+    try:
+        usages = await asyncio.to_thread(graph_store.find_usages, name, repo, branch, min(limit, 300))
+        return {"name": name, "usages": usages}
+    except Exception as exc:
+        log.error("Error buscando usos de %s: %s", name, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/graph/flow/{name}", dependencies=[Depends(verify_api_key)])
+async def graph_flow(name: str, repo: str | None = None, branch: str | None = None, depth: int = 4):
+    """Flujo hacia abajo: qué llama, qué inyecta, qué SQL ejecuta y qué tablas toca."""
+    try:
+        edges = await asyncio.to_thread(graph_store.get_flow, name, repo, branch, depth)
+        return {"name": name, "depth": depth, "edges": edges}
+    except Exception as exc:
+        log.error("Error obteniendo flujo de %s: %s", name, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/sql/table/{table}", dependencies=[Depends(verify_api_key)])
+async def sql_table_usage(table: str, repo: str | None = None, branch: str | None = None):
+    """Qué .sql y qué métodos leen o escriben una tabla."""
+    try:
+        usage = await asyncio.to_thread(graph_store.find_table_usage, table, repo, branch)
+        return {"table": table.upper(), "usage": usage}
+    except Exception as exc:
+        log.error("Error buscando uso de la tabla %s: %s", table, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/sql/tables", dependencies=[Depends(verify_api_key)])
+async def sql_tables(repo: str, branch: str | None = None):
+    """Tablas que usa un repo, con cuántos lectores y escritores tiene cada una."""
+    try:
+        tables = await asyncio.to_thread(graph_store.list_tables, repo, branch)
+        return {"repo": repo, "tables": tables}
+    except Exception as exc:
+        log.error("Error listando tablas de %s: %s", repo, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/endpoints", dependencies=[Depends(verify_api_key)])
+async def list_endpoints(repo: str, branch: str | None = None):
+    """Rutas HTTP (Spring MVC / JAX-RS) expuestas por un repo."""
+    try:
+        endpoints = await asyncio.to_thread(graph_store.list_endpoints, repo, branch)
+        return {"repo": repo, "endpoints": endpoints}
+    except Exception as exc:
+        log.error("Error listando endpoints de %s: %s", repo, exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
