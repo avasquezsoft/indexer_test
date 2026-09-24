@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import re
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends, Header
@@ -59,42 +60,6 @@ def _resolve_sql_path(java_file_path: str, sql_ref: str, all_file_paths: set[str
             return path
 
     return None
-
-
-async def _inline_sql_references(
-    chunks: list[dict],
-    token: str,
-    owner: str,
-    repo: str,
-    branch: str,
-    all_file_paths: set[str],
-    sql_files_map: dict[str, dict],
-) -> list[dict]:
-    """
-    Busca referencias a archivos .sql dentro de los chunks y adjunta
-    el contenido SQL al mismo chunk (text + embed_text).
-    Si el SQL es muy grande se trunca para no romper los límites de embedding.
-    """
-    _MAX_INLINE_SQL_CHARS = 6000
-    for chunk in chunks:
-        for match in _SQL_REF_RE.finditer(chunk["text"]):
-            sql_ref = match.group(1)
-            resolved = _resolve_sql_path(chunk["metadata"]["file_path"], sql_ref, all_file_paths)
-            if resolved and resolved in sql_files_map:
-                try:
-                    sql_content = get_file_content(token, owner, repo, resolved, ref=branch)
-                    if sql_content and sql_content.strip():
-                        if len(sql_content) > _MAX_INLINE_SQL_CHARS:
-                            sql_content = (
-                                sql_content[:_MAX_INLINE_SQL_CHARS]
-                                + f"\n-- ... SQL truncado ({len(sql_content)} chars originales) ... --\n"
-                            )
-                        sql_header = f"\n\n-- Referenced SQL: {resolved} --\n"
-                        chunk["text"] += sql_header + sql_content
-                        chunk["metadata"]["embed_text"] += sql_header + sql_content
-                except Exception as exc:
-                    log.debug(f"No se pudo leer SQL referenciado {resolved}: {exc}")
-    return chunks
 
 
 # ─────────────────────────────────────────
@@ -252,14 +217,35 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
         owner, repo = full_repo_name.split("/", 1)
         log.info(f"Indexando {full_repo_name} @ {branch}...")
 
-        # Asegurar clon local actualizado
+        # Asegurar clon local actualizado: si existe, los archivos se leen de disco
+        clone_ok = False
         try:
             if await repo_clone.clone_or_pull_repo(full_repo_name, branch):
+                clone_ok = True
                 log.info("Clon local actualizado para %s @ %s", full_repo_name, branch)
         except Exception as exc:
             log.warning("No se pudo actualizar clon local de %s: %s", full_repo_name, exc)
 
         token = get_installation_token_for_repo(owner, repo)
+        read_counts = {"clon": 0, "api": 0}
+
+        def read_file(path: str) -> str | None:
+            """Lee del clon local; si no está ahí, de la API de GitHub."""
+            if clone_ok:
+                content = repo_clone.read_file_from_clone(full_repo_name, path, branch)
+                if content is not None:
+                    read_counts["clon"] += 1
+                    return content
+            read_counts["api"] += 1
+            return get_file_content(token, owner, repo, path, ref=branch)
+
+        # Un .sql lo referencian varios chunks y archivos Java: se lee una sola vez
+        sql_cache: dict[str, str | None] = {}
+
+        def read_sql(path: str) -> str | None:
+            if path not in sql_cache:
+                sql_cache[path] = read_file(path)
+            return sql_cache[path]
         files = get_repo_files(token, owner, repo, ref=branch)
         log.info(f"Encontrados {len(files)} archivos en {full_repo_name} @ {branch}")
 
@@ -286,7 +272,7 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
             processed = False
             while attempt < max_token_retries and not processed:
                 try:
-                    content = get_file_content(token, owner, repo, file_info["path"], ref=branch)
+                    content = read_file(file_info["path"])
                     if not content or not content.strip():
                         log.debug(f"Archivo vacío o sin contenido: {file_info['path']}")
                         processed = True
@@ -312,8 +298,8 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
                     # Si es Java, resolver referencias a SQL inline
                     if file_info["path"].lower().endswith(".java") and sql_files_map:
-                        chunks = await _inline_sql_references_ast(
-                            chunks, token, owner, repo, branch, all_file_paths, sql_files_map
+                        chunks = _inline_sql_references_ast(
+                            chunks, read_sql, all_file_paths, sql_files_map
                         )
 
                     all_entities.extend(entities)
@@ -335,7 +321,7 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                     attempt += 1
                     if attempt < max_token_retries:
                         log.warning(f"Token expirado procesando {file_info['path']}, renovando token ({attempt}/{max_token_retries})...")
-                        token = get_installation_token()
+                        token = get_installation_token_for_repo(owner, repo)
                     else:
                         log.error(f"Token sigue expirado después de {max_token_retries} intentos. Saltando {file_info['path']}")
                         processed = True
@@ -350,6 +336,7 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
             total_chunks += len(all_chunks)
 
         log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_entities} entidades, {total_chunks} chunks guardados")
+        log.info("Archivos leídos: %d desde el clon, %d desde la API de GitHub", read_counts["clon"], read_counts["api"])
         success = True
         details = f"Archivos procesados: {total_files}\nEntidades: {total_entities}\nChunks: {total_chunks}"
 
@@ -389,12 +376,9 @@ async def _flush_to_graph(client, entities: list, chunks: list):
             log.error("Error guardando chunks en Qdrant: %s", exc)
 
 
-async def _inline_sql_references_ast(
+def _inline_sql_references_ast(
     chunks: list[dict],
-    token: str,
-    owner: str,
-    repo: str,
-    branch: str,
+    read_sql: Callable[[str], str | None],
     all_file_paths: set[str],
     sql_files_map: dict[str, dict],
 ) -> list[dict]:
@@ -407,7 +391,7 @@ async def _inline_sql_references_ast(
             resolved = _resolve_sql_path(chunk["metadata"].get("file_path", ""), sql_ref, all_file_paths)
             if resolved and resolved in sql_files_map:
                 try:
-                    sql_content = get_file_content(token, owner, repo, resolved, ref=branch)
+                    sql_content = read_sql(resolved)
                     if sql_content and sql_content.strip():
                         if len(sql_content) > _MAX_INLINE_SQL_CHARS:
                             sql_content = (
