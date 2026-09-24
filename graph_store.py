@@ -511,3 +511,30 @@ def list_endpoints(repo: str, branch: str | None = None) -> list[dict]:
             repo=repo, branch=branch,
         )
         return [dict(record) for record in result]
+
+
+def search_names(term: str, repo: str | None = None, branch: str | None = None, limit: int = 200) -> list[dict]:
+    """
+    Entidades cuyo nombre contiene un término (sin distinguir mayúsculas): clases,
+    métodos, campos, SQL y tablas. Para campos y métodos incluye la clase dueña, así
+    "cegid" encuentra el campo emCegid y con él todas las clases que usan esa conexión.
+    """
+    with get_driver().session() as session:
+        result = session.run(
+            """
+            MATCH (e:CodeEntity)
+            WHERE ($repo IS NULL OR e.repo = $repo)
+              AND ($branch IS NULL OR e.branch = $branch)
+              AND toLower(e.name) CONTAINS toLower($term)
+            OPTIONAL MATCH (owner:CodeEntity)-[:HAS_FIELD|HAS_METHOD]->(e)
+            RETURN e.name AS name, e.type AS type, owner.name AS owner, e.signature AS signature,
+                   e.file_path AS file_path, e.start_line AS start_line, e.route AS route
+            ORDER BY CASE e.type
+                       WHEN 'Class' THEN 0 WHEN 'Interface' THEN 0 WHEN 'Field' THEN 1
+                       WHEN 'SqlFile' THEN 2 WHEN 'Table' THEN 2 ELSE 3 END,
+                     e.file_path, e.start_line
+            LIMIT $limit
+            """,
+            term=term, repo=repo, branch=branch, limit=limit,
+        )
+        return [dict(record) for record in result]

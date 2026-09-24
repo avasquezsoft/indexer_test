@@ -734,6 +734,19 @@ async def graph_usages(name: str, repo: str | None = None, branch: str | None = 
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/graph/search", dependencies=[Depends(verify_api_key)])
+async def graph_search(term: str, repo: str | None = None, branch: str | None = None, limit: int = 200):
+    """Entidades cuyo nombre contiene un término (ej. "cegid" → emCegid, CegidQueryDAOImpl...)."""
+    if len(term.strip()) < 3:
+        raise HTTPException(status_code=400, detail="El término debe tener al menos 3 caracteres")
+    try:
+        matches = await asyncio.to_thread(graph_store.search_names, term.strip(), repo, branch, min(limit, 500))
+        return {"term": term, "matches": matches}
+    except Exception as exc:
+        log.error("Error buscando '%s' en el grafo: %s", term, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/graph/flow/{name}", dependencies=[Depends(verify_api_key)])
 async def graph_flow(name: str, repo: str | None = None, branch: str | None = None, depth: int = 4):
     """Flujo hacia abajo: qué llama, qué inyecta, qué SQL ejecuta y qué tablas toca."""

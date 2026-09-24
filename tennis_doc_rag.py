@@ -1,6 +1,6 @@
 """
 title: Tennis Doc RAG
-version: 3.5
+version: 3.6
 requirements: requests
 description: Filtro para Open WebUI que recupera contexto de código desde Tennis Doc IA.
 
@@ -351,6 +351,35 @@ _TABLES_LIST_RE = re.compile(
 _TABLE_WORD_RE = re.compile(r"\btablas?\s+[`'\"]?([A-Za-z_][\w$#]*)", re.IGNORECASE)
 _UPPER_SNAKE_RE = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b(?!\.sql)")
 
+# Palabras de las preguntas que no nombran nada del código (texto normalizado).
+# Lo que queda ("cegid", "bonos", "kardex"...) se busca por nombre en el grafo.
+_CONCEPT_STOP = {
+    "procesos", "proceso", "importantes", "importante", "principales", "principal",
+    "manejan", "maneja", "manejo", "involucran", "involucra", "conexion", "conexiones",
+    "base", "bases", "datos", "dato", "repositorio", "repo", "sistema", "sistemas",
+    "informacion", "funcionalidad", "funcionalidades", "logica", "flujo", "flujos",
+    "codigo", "clases", "clase", "metodos", "metodo", "tablas", "tabla", "archivos",
+    "archivo", "parte", "partes", "todo", "todos", "todas", "cuales", "usan", "usado",
+    "usada", "utilizan", "utiliza", "tienen", "hacen", "relacionado", "relacionados",
+    "relacion", "general", "forma", "manera", "cosas", "explica", "explicame", "dime",
+    "quiero", "necesito", "puedes", "podrias", "mostrar", "lista", "listar", "detalle",
+    "detalles", "tipo", "tipos", "funciona", "funcionan", "servicio", "servicios",
+    "aplicacion", "proyecto", "modulo", "modulos", "rama", "branch", "prod", "develop",
+    "consulta", "consultas", "hace", "tiene", "donde", "como", "para", "sobre", "desde",
+    "entre", "cuando", "este", "esta", "estos", "estas", "algun", "alguna", "otros",
+}
+
+# Tipo de un campo que es una conexión a base de datos
+_CONNECTION_TYPE_RE = re.compile(
+    r"\b(?:EntityManager|EntityManagerFactory|DataSource|JdbcTemplate|NamedParameterJdbcTemplate|"
+    r"SessionFactory|Connection|MongoTemplate|SqlSession(?:Template)?)\b"
+)
+
+# Componentes de la aplicación: DAO, servicios, clientes, controllers
+_DEPENDENCY_TYPE_RE = re.compile(r"(?:Dao|DAO|DaoImpl|DAOImpl|Service|ServiceImpl|Client|ClientImpl|Controller|Repository)\b")
+
+_ACCESSOR_NAME_RE = re.compile(r"^(?:get|set|is)[A-Z_]")
+
 _TABLE_STOP = {
     "de", "del", "la", "las", "el", "los", "que", "donde", "en", "se", "y", "o",
     "con", "por", "para", "usa", "usan", "a", "al",
@@ -546,6 +575,12 @@ _STRATEGY_HINTS = {
         "Identifica la query, tablas, DAO/Repository, procedimientos "
         "almacenados y el método Java que los usa."
     ),
+    "concept": (
+        "La pregunta es sobre un concepto del sistema. Con el MAPA DEL GRAFO agrupa "
+        "por proceso o funcionalidad: qué clases lo usan, qué hace cada una (SQL y "
+        "tablas) y quién las invoca (servicios, controllers, tareas). Indica cuántas "
+        "clases están involucradas en total y cuáles se detallan."
+    ),
     "usages": (
         "Lista quién usa o llama a la entidad (clase, método y archivo) según el "
         "MAPA DEL GRAFO, y explica brevemente para qué la usa cada uno."
@@ -625,7 +660,11 @@ class Filter:
                 "y tablas, uso de tablas y endpoints."
             ),
         )
-        graph_map_max_chars: int = 12000
+        graph_map_max_chars: int = 16000
+        concept_classes: int = Field(
+            default=10,
+            description="En preguntas de concepto, cuántas clases detallar con su SQL/tablas y quién las usa.",
+        )
         endpoint_flows: int = Field(
             default=5,
             description="Al pedir endpoints, cuántos controllers incluir con su flujo hasta SQL/tablas.",
@@ -1036,9 +1075,15 @@ class Filter:
 
         tables = self._extract_tables(clean)
 
-        entities = [e for e in self._extract_entities(clean) if e.upper() not in tables]
+        # El nombre corto de un repo ("tnsERPTareasPDN") parece camelCase pero no es código.
+        repo_names = {n.split("/")[-1].lower() for n in (self._known_repo_names() or [])}
 
-        methods = self._extract_methods(clean)
+        entities = [
+            e for e in self._extract_entities(clean)
+            if e.upper() not in tables and e.lower() not in repo_names
+        ]
+
+        methods = [m for m in self._extract_methods(clean) if m.lower() not in repo_names]
 
         is_sql = bool(_SQL_RE.search(query)) or bool(tables)
 
@@ -1047,6 +1092,20 @@ class Filter:
         is_code = bool(_CODE_RE.search(query))
 
         wants_usages = bool(_USAGES_RE.search(norm))
+
+        concepts = []
+
+        if not (entities or methods or tables):
+
+            for word in self._extract_keywords(clean):
+
+                word = _normalize(word)
+
+                if len(word) >= 4 and word not in _CONCEPT_STOP and word not in repo_names and word not in concepts:
+
+                    concepts.append(word)
+
+            concepts = concepts[:3]
 
         if is_architecture:
 
@@ -1072,6 +1131,10 @@ class Filter:
 
             strategy = "semantic"
 
+        if concepts and strategy in ("code", "semantic"):
+
+            strategy = "concept"
+
         return {
             "strategy": strategy,
             "entities": entities,
@@ -1080,6 +1143,7 @@ class Filter:
             "is_architecture": is_architecture,
             "is_code": is_code,
             "tables": tables,
+            "concepts": concepts,
             "wants_usages": wants_usages,
             "wants_endpoints": bool(_ENDPOINTS_RE.search(norm)),
             "wants_tables": bool(_TABLES_LIST_RE.search(norm)) and not tables,
@@ -1641,13 +1705,14 @@ class Filter:
 
         search_query = self._enrich_query(retrieval_query or query, analysis)
 
-        use_graph = analysis["strategy"] in {"architecture", "entity", "usages", "code", "sql"}
+        use_graph = analysis["strategy"] in {"architecture", "entity", "usages", "concept", "code", "sql"}
 
         entity_names = analysis["entities"]
 
         self._log(
             f"strategy={analysis['strategy']} | repo={repo} | branch={branch} "
             f"| entities={entity_names} | methods={analysis['methods']}"
+            f" | tables={analysis['tables']} | concepts={analysis.get('concepts', [])}"
         )
 
         self._status("🔎 Buscando en el código indexado…")
@@ -1839,6 +1904,210 @@ class Filter:
 
         return lines
 
+    @staticmethod
+    def _field_kind(match):
+        """'connection' (EntityManager, DataSource...), 'dependency' (Dao/Service/Client) o 'data'."""
+
+        signature = match.get("signature") or ""
+
+        declared = re.search(rf"([\w.<>]+)\s+{re.escape(match.get('name', ''))}\s*(?:=|$)", signature.strip())
+
+        field_type = declared.group(1) if declared else ""
+
+        if _CONNECTION_TYPE_RE.search(field_type):
+
+            return "connection"
+
+        if _DEPENDENCY_TYPE_RE.search(field_type) or _DEPENDENCY_TYPE_RE.search(match.get("name", "")):
+
+            return "dependency"
+
+        return "data"
+
+    def _fmt_concept(self, data):
+
+        matches = data.get("matches", [])
+
+        lines = []
+
+        fields = [r for r in matches if r.get("type") == "Field"]
+
+        kinds = {"connection": [], "dependency": [], "data": []}
+
+        for r in fields:
+
+            kinds[self._field_kind(r)].append(r)
+
+        labels = {
+            "connection": "Clases que usan la conexión a base de datos",
+            "dependency": "Clases que dependen de componentes",
+        }
+
+        for kind in ("connection", "dependency"):
+
+            if kinds[kind]:
+
+                owners = list(dict.fromkeys(r["owner"] for r in kinds[kind] if r.get("owner")))
+
+                names = ", ".join(sorted({f"`{r['name']}`" for r in kinds[kind]}))
+
+                lines.append(f"- {labels[kind]} {names} ({len(owners)}): {', '.join(owners)}")
+
+        if kinds["data"]:
+
+            owners = list(dict.fromkeys(r["owner"] for r in kinds["data"] if r.get("owner")))
+
+            lines.append(
+                f"- Entidades/DTOs con campos de datos que lo mencionan ({len(owners)}): "
+                + ", ".join(owners[:15])
+                + (f" (+{len(owners) - 15} más)" if len(owners) > 15 else "")
+            )
+
+        for kind, label in (("Class", "Clases"), ("Interface", "Interfaces"), ("Enum", "Enums")):
+
+            found = [r for r in matches if r.get("type") == kind]
+
+            if found:
+
+                lines.append(f"- {label}: " + ", ".join(r["name"] for r in found[:40]))
+
+        methods = [r for r in matches if r.get("type") in ("Method", "Function")]
+
+        logic = [r for r in methods if not _ACCESSOR_NAME_RE.match(r["name"])]
+
+        if logic:
+
+            shown = ", ".join(self._qualified(r.get("owner"), r["name"]) for r in logic[:20])
+
+            more = f" (+{len(logic) - 20} más)" if len(logic) > 20 else ""
+
+            accessors = len(methods) - len(logic)
+
+            extra = f"; además {accessors} getters/setters" if accessors else ""
+
+            lines.append(f"- Métodos ({len(logic)}{extra}): {shown}{more}")
+
+        for kind, label in (("SqlFile", "Archivos SQL"), ("Table", "Tablas")):
+
+            found = [r["name"] for r in matches if r.get("type") == kind]
+
+            if found:
+
+                lines.append(f"- {label}: " + ", ".join(found[:30]))
+
+        return lines
+
+    def _fmt_sql_by_method(self, data):
+        """Una línea por método: qué .sql ejecuta y qué tablas lee/escribe."""
+
+        edges = data.get("edges", [])
+
+        sql_tables = {}
+
+        for r in edges:
+
+            if r.get("source_type") == "SqlFile" and r.get("rel_type") in ("READS", "WRITES"):
+
+                sql_tables.setdefault(r["source"], {"READS": [], "WRITES": []})[r["rel_type"]].append(r["target"])
+
+        per_method = {}
+
+        for r in edges:
+
+            if r.get("source_type") == "SqlFile":
+
+                continue
+
+            key = self._qualified(r.get("source_class"), r.get("source"))
+
+            entry = per_method.setdefault(key, {"sql": [], "READS": [], "WRITES": []})
+
+            if r.get("rel_type") == "USES_SQL":
+
+                entry["sql"].append(r["target"])
+
+                for access in ("READS", "WRITES"):
+
+                    entry[access] += sql_tables.get(r["target"], {}).get(access, [])
+
+            elif r.get("rel_type") in ("READS", "WRITES"):
+
+                entry[r["rel_type"]].append(r["target"])
+
+        lines = []
+
+        for method, entry in per_method.items():
+
+            if not (entry["sql"] or entry["READS"] or entry["WRITES"]):
+
+                continue
+
+            parts = []
+
+            if entry["sql"]:
+
+                parts.append(", ".join(dict.fromkeys(entry["sql"])))
+
+            if entry["READS"]:
+
+                parts.append("lee " + ", ".join(dict.fromkeys(entry["READS"])))
+
+            if entry["WRITES"]:
+
+                parts.append("escribe " + ", ".join(dict.fromkeys(entry["WRITES"])))
+
+            lines.append(f"- {method} → " + " → ".join(parts))
+
+        # Clases con decenas de métodos (DAOs grandes) no deben tapar a las demás
+        if len(lines) > 12:
+
+            lines = lines[:12] + [f"- (+{len(lines) - 12} métodos más con SQL; usa get_call_flow para verlos)"]
+
+        return lines
+
+    def _fmt_callers(self, data):
+        """Quién usa la clase, en una sola línea."""
+
+        callers = list(
+            dict.fromkeys(
+                self._qualified(r.get("source_class"), r.get("source_name"))
+                for r in data.get("usages", [])
+                if r.get("rel_type") in ("CALLS", "INJECTED", "EXTENDS", "IMPLEMENTS")
+            )
+        )
+
+        if not callers:
+
+            return []
+
+        more = f" (+{len(callers) - 12} más)" if len(callers) > 12 else ""
+
+        return [f"- Usado por: {', '.join(callers[:12])}{more}"]
+
+    def _concept_classes(self, data):
+        """
+        Clases a detallar, de la más a la menos relevante: las que tienen la conexión
+        (EntityManager emCegid...), las clases nombradas que son DAO/Service/Client,
+        las que dependen de ellas y el resto. Las entidades/DTOs quedan fuera.
+        """
+
+        matches = data.get("matches", [])
+
+        fields = [r for r in matches if r.get("type") == "Field" and r.get("owner")]
+
+        named = [r["name"] for r in matches if r.get("type") in ("Class", "Interface")]
+
+        ordered = [r["owner"] for r in fields if self._field_kind(r) == "connection"]
+
+        ordered += [n for n in named if _DEPENDENCY_TYPE_RE.search(n)]
+
+        ordered += [r["owner"] for r in fields if self._field_kind(r) == "dependency"]
+
+        ordered += [r["owner"] for r in matches if r.get("type") == "Method" and r.get("owner")
+                    and not _ACCESSOR_NAME_RE.match(r["name"])]
+
+        return list(dict.fromkeys(ordered))
+
     def _fmt_endpoints(self, data):
 
         return [
@@ -1892,6 +2161,17 @@ class Filter:
 
             calls.append(("Tablas que usa el repositorio", "/sql/tables", scope, self._fmt_tables))
 
+        for term in analysis.get("concepts", []):
+
+            calls.append(
+                (
+                    f"Código con «{term}» en el nombre",
+                    "/graph/search",
+                    {**scope, "term": term, "limit": 300},
+                    self._fmt_concept,
+                )
+            )
+
         if not calls:
 
             return ""
@@ -1900,34 +2180,51 @@ class Filter:
 
             datas = list(pool.map(lambda c: self._graph_get(c[1], c[2]), calls))
 
-        # Endpoints: además de la lista, el flujo de cada controller hasta SQL y tablas.
-        controllers = []
+        # Segunda ronda: el flujo de cada controller (si se pidieron endpoints) y,
+        # en preguntas de concepto, qué hacen las clases encontradas y quién las usa.
+        follow = []
 
         for (_, endpoint, _, _), data in zip(calls, datas):
 
-            if endpoint == "/endpoints" and data:
+            if not data:
+
+                continue
+
+            if endpoint == "/endpoints":
 
                 controllers = list(
                     dict.fromkeys(r["class"] for r in data.get("endpoints", []) if r.get("class"))
                 )[: self.valves.endpoint_flows]
 
-        if controllers:
+                follow += [
+                    (
+                        f"Flujo desde `{name}` (llamadas, SQL y tablas)",
+                        f"/graph/flow/{name}",
+                        {**scope, "depth": self.valves.flow_depth},
+                        self._fmt_flow,
+                    )
+                    for name in controllers
+                ]
 
-            flow_calls = [
-                (
-                    f"Flujo desde `{name}` (llamadas, SQL y tablas)",
-                    f"/graph/flow/{name}",
-                    {**scope, "depth": self.valves.flow_depth},
-                    self._fmt_flow,
-                )
-                for name in controllers
-            ]
+            elif endpoint == "/graph/search":
 
-            with ThreadPoolExecutor(max_workers=len(flow_calls)) as pool:
+                for name in self._concept_classes(data)[: self.valves.concept_classes]:
 
-                datas += list(pool.map(lambda c: self._graph_get(c[1], c[2]), flow_calls))
+                    follow.append(
+                        (f"`{name}`: SQL y tablas", f"/graph/flow/{name}", {**scope, "depth": 2}, self._fmt_sql_by_method)
+                    )
 
-            calls += flow_calls
+                    follow.append(
+                        (f"`{name}`: quién la usa", f"/graph/usages/{name}", {**scope, "limit": 60}, self._fmt_callers)
+                    )
+
+        if follow:
+
+            with ThreadPoolExecutor(max_workers=min(8, len(follow))) as pool:
+
+                datas += list(pool.map(lambda c: self._graph_get(c[1], c[2]), follow))
+
+            calls += follow
 
         sections = []
 
@@ -2104,7 +2401,7 @@ class Filter:
         sources_rule = (
             "8. La información del código está en el CONTEXTO y el MAPA DEL GRAFO. Si "
             "necesitas más, usa solo las herramientas de Tennis Doc (search_code, "
-            "read_file, find_usages, get_call_flow, find_table_usage...); no busques "
+            "read_file, find_by_name, find_usages, get_call_flow, find_table_usage...); no busques "
             "en archivos de conocimiento ni en la web."
             if tools_on
             else "8. La información del código está en el CONTEXTO y el MAPA DEL GRAFO; "

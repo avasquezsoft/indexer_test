@@ -1,6 +1,6 @@
 """
 title: Tennis Doc Tools
-version: 1.3
+version: 1.4
 requirements: requests
 description: Acciones de Tennis Doc IA que el modelo puede llamar solo (function calling):
              explorar el código (buscar, leer archivos, quién usa qué, flujo hasta SQL y
@@ -740,6 +740,57 @@ class Tools:
             f"({r.get('file_path')}:{r.get('start_line')})"
             for r in endpoints
         ]
+
+        return self._cap("\n".join(lines))
+
+    async def find_by_name(
+        self,
+        term: str,
+        repo: str = "",
+        branch: str = "",
+        __event_emitter__: Optional[Callable[[dict], Any]] = None,
+    ) -> str:
+        """
+        Busca clases, métodos, campos, archivos SQL y tablas cuyo nombre contiene un
+        término (ej. "cegid", "bono", "kardex"). Úsala para preguntas sobre un concepto
+        o una conexión: por ejemplo "cegid" encuentra el campo emCegid y así todas las
+        clases que usan esa base de datos. Luego usa get_call_flow / find_usages sobre
+        las clases encontradas.
+
+        :param term: Parte del nombre a buscar (mínimo 3 letras).
+        :param repo: Repositorio "organizacion/repositorio" (recomendado).
+        :param branch: Rama (opcional).
+        """
+
+        await self._status(__event_emitter__, f"🔤 Buscando «{term}» en el código…")
+
+        try:
+
+            data = self._get_json("/graph/search", {"term": term, "repo": repo, "branch": branch, "limit": 300})
+
+        except Exception as exc:
+
+            await self._status(__event_emitter__, "Error en la búsqueda", True)
+
+            return f"ERROR buscando «{term}»: {exc}"
+
+        matches = (data or {}).get("matches", [])
+
+        await self._status(__event_emitter__, f"{len(matches)} coincidencias", True)
+
+        if not matches:
+
+            return f"No hay entidades con «{term}» en el nombre."
+
+        lines = [f"Entidades con «{term}» en el nombre ({len(matches)}):"]
+
+        for r in matches:
+
+            owner = f" en {r['owner']}" if r.get("owner") else ""
+
+            route = f" [endpoint {r['route']}]" if r.get("route") else ""
+
+            lines.append(f"- {r.get('type')} {r.get('name')}{owner} ({r.get('file_path')}){route}")
 
         return self._cap("\n".join(lines))
 
