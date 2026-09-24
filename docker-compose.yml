@@ -95,6 +95,8 @@ services:
       - -c
       - |
         set -e
+        # git lo usa repo_clone.py para el clon local (búsqueda en caliente)
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates > /dev/null
         pip install --quiet --no-cache-dir dulwich
         python3 -c "
         import os, shutil
