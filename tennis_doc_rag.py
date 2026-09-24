@@ -1,6 +1,6 @@
 """
 title: Tennis Doc RAG
-version: 3.1
+version: 3.2
 requirements: requests
 description: Filtro para Open WebUI que recupera contexto de código desde Tennis Doc IA.
 
@@ -1158,6 +1158,16 @@ class Filter:
 
         return None
 
+    def _is_command(self, query):
+        """Indexar, PDF, grafo o repos: lo mismo que ofrece la Tool."""
+
+        return bool(
+            _INDEX_CMD_RE.match(query)
+            or self._wants_export(query, _PDF_WORD_RE, _PDF_EXPLICIT_RE)
+            or _GRAPH_RE.search(query)
+            or self._detect_repos_intent(query)
+        )
+
     def _tools_active(self, body, metadata):
 
         tool_ids = list(body.get("tool_ids") or [])
@@ -2228,6 +2238,13 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
                 self._log(f"Intención repos: {repos_intent}")
 
                 return self._answer_repos(body, repos_intent)
+
+        elif self._tools_active(body, metadata) and self._is_command(query):
+
+            # La Tool lo ejecuta (function calling): buscar código es trabajo perdido.
+            self._log("Comando con la Tool activa: sin búsqueda RAG")
+
+            return body
 
         # -------------------------------------------------
         # CHARLA / REESCRITURA → sin búsqueda

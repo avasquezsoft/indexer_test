@@ -40,6 +40,10 @@ IGNORED_PATHS = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml"
 }
 
+# Librerías de terceros minificadas (jquery.min.js, bootstrap.min.css...):
+# muchos chunks gigantes que no aportan y ensucian las búsquedas.
+MINIFIED_SUFFIXES = (".min.js", ".min.css")
+
 # Timeout para llamadas a la API de GitHub (segundos)
 _GITHUB_TIMEOUT = 30.0
 
@@ -168,6 +172,8 @@ def get_repo_files(token: str, owner: str, repo: str, ref: str = "HEAD") -> list
         # Ignorar carpetas bloqueadas
         parts = path.split("/")
         if any(p in IGNORED_PATHS for p in parts):
+            continue
+        if path.lower().endswith(MINIFIED_SUFFIXES):
             continue
         # Solo extensiones soportadas
         ext = __import__("os").path.splitext(path)[1].lower()

@@ -17,7 +17,7 @@ from dulwich import porcelain
 
 from ast_parser import _get_parser
 from config import CLONE_BASE_DIR
-from github_client import get_installation_token_for_repo
+from github_client import MINIFIED_SUFFIXES, get_installation_token_for_repo
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ def search_clone(
         dirs[:] = [d for d in dirs if d not in _IGNORED_DIRS]
         for fname in fnames:
             stem, ext = os.path.splitext(fname)
-            if ext.lower() not in _CLONE_SEARCH_EXTS:
+            if ext.lower() not in _CLONE_SEARCH_EXTS or fname.lower().endswith(MINIFIED_SUFFIXES):
                 continue
             fpath = os.path.join(root, fname)
             try:
