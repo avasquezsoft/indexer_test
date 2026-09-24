@@ -35,7 +35,7 @@ SUPPORTED_EXTENSIONS = {
 
 # Archivos y carpetas que ignoramos
 IGNORED_PATHS = {
-    "node_modules", ".git", "dist", "build",
+    "node_modules", ".git", "dist", "build", "target",
     "__pycache__", ".next", "coverage", "vendor",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml"
 }

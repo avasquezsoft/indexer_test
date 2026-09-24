@@ -175,6 +175,11 @@ def upsert_entities(entities: list) -> list[dict]:
 
 _REL_BATCH = 2000
 
+# CALLS sin tipo de receptor: se enlazan por nombre solo si hay pocos homónimos.
+# Medido en tnsERPTareasPDN: 1-3 destinos son el 90% de los casos; los demás
+# saltan a 131 (hashCode/equals de beans generados) y eran el 76% de las aristas.
+_MAX_AMBIGUOUS_CALL_TARGETS = 3
+
 
 def upsert_relations(rels: list[dict]) -> int:
     """
@@ -223,6 +228,11 @@ def upsert_relations(rels: list[dict]) -> int:
                         WHEN 'ANNOTATED_WITH' THEN true
                         ELSE b.type IN ['Class', 'Interface', 'Enum', 'Record', 'Struct']
                       END
+                WITH rel, a, collect(b) AS targets
+                // Llamada sin tipo inferido con muchos homónimos: es ruido, no se enlaza
+                WHERE rel.rel_type <> 'CALLS' OR rel.target_owners IS NOT NULL
+                      OR size(targets) <= $max_ambiguous
+                UNWIND targets AS b
                 CALL apoc.merge.relationship(a, rel.rel_type,
                     {target_id: b.id},
                     rel.properties,
@@ -231,10 +241,12 @@ def upsert_relations(rels: list[dict]) -> int:
                 RETURN count(r) AS created
                 """,
                 rels=group[i:i + _REL_BATCH],
+                max_ambiguous=_MAX_AMBIGUOUS_CALL_TARGETS,
             ).single()
             created += record["created"] if record else 0
 
-    logger.info("Neo4j: %s relaciones creadas (de %s declaradas)", created, len(rels))
+    # Una relación declarada puede dar varias aristas (p. ej. una interfaz con 2 implementaciones)
+    logger.info("Neo4j: %s aristas creadas para %s relaciones declaradas", created, len(rels))
     return created
 
 

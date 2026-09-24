@@ -179,7 +179,7 @@ def add_sql_links(entities: list[GraphEntity], resolve: Callable[[str, str], str
 
 _CALL_NAME_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _RECEIVER_RE = re.compile(r"([A-Za-z_]\w*)\s*\.\s*$")
-_NOT_CALLS = {"if", "for", "while", "switch", "catch", "return", "synchronized", "new", "super", "this", "throw"}
+_OBJECT_CALLS = {"equals", "hashCode", "toString", "getClass"}
 
 
 def _declared_type(code: str, var: str) -> str | None:
@@ -235,6 +235,10 @@ def resolve_call_owners(entities: list[GraphEntity]) -> None:
     fields = [e for e in entities if e.type == "Field"]
 
     for method in (e for e in entities if e.type == "Method"):
+        # equals/hashCode/toString/getClass: métodos de Object, no dicen nada del flujo
+        method.relations = [
+            r for r in method.relations if not (r.type == "CALLS" and r.target_name in _OBJECT_CALLS)
+        ]
         owners_of_file = [
             c for c in classes
             if c.file_path == method.file_path and c.start_line <= method.start_line <= c.end_line

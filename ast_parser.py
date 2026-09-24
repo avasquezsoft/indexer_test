@@ -6,6 +6,7 @@ Soporta Tree-sitter (multilenguaje) y JavaParser (Java/Spring Boot vía HTTP).
 
 import logging
 import os
+import re
 from typing import Literal
 
 import httpx
@@ -100,12 +101,15 @@ def _get_parser(language: str) -> Parser | None:
 
 _JAVAPARSER_URL = os.environ.get("JAVAPARSER_URL", "http://javaparser:8080")
 _JAVAPARSER_TIMEOUT = 30.0
+# Un cliente reutilizado: abrir una conexión por archivo costaba ~0,7 s en Docker Desktop
+# (3 ms reutilizándola); en repos de miles de .java era casi todo el tiempo de parseo.
+_JAVAPARSER_CLIENT = httpx.Client(timeout=_JAVAPARSER_TIMEOUT)
 
 
 def _parse_java_with_javaparser(source: str, file_path: str) -> list[GraphEntity] | None:
     """Delega al microservicio JavaParser. Devuelve None si falla (fallback a Tree-sitter)."""
     try:
-        resp = httpx.post(
+        resp = _JAVAPARSER_CLIENT.post(
             f"{_JAVAPARSER_URL}/parse",
             json={"source": source, "file_path": file_path},
             timeout=_JAVAPARSER_TIMEOUT,
@@ -672,6 +676,8 @@ def parse_file_to_chunks_and_entities(source: str, language: str, repo: str, bra
     entities = parse_file(source, language, repo, branch, file_path)
     chunks = []
     for ent in entities:
+        if _is_trivial(ent):
+            continue  # queda en el grafo, pero sin chunk/embedding propio
         text = ent.code
         # Truncar clases/interfaces enormes; los métodos/fields individuales cubren el contenido
         if ent.type in ("Class", "Interface", "Enum") and len(text) > 12000:
@@ -692,6 +698,28 @@ def parse_file_to_chunks_and_entities(source: str, language: str, repo: str, bra
             },
         })
     return entities, chunks
+
+
+_ACCESSOR_RE = re.compile(r"^(?:get|set|is)[A-Z_]")
+_OBJECT_METHODS = {"equals", "hashCode", "toString"}
+
+
+def _is_trivial(ent: GraphEntity) -> bool:
+    """
+    Campos, getters/setters de una línea y equals/hashCode/toString: en repos con
+    beans generados son ~90% de las entidades y no aportan a la búsqueda (el chunk
+    de la clase ya los contiene). Medido en tnsERPTareasPDN: 21.390 de 24.061.
+    """
+    if ent.type == "Field":
+        return True
+    if ent.type != "Method":
+        return False
+    if ent.name in _OBJECT_METHODS:
+        return True
+    if not _ACCESSOR_RE.match(ent.name) or "{" not in ent.code:
+        return False
+    body = ent.code[ent.code.find("{") + 1 : ent.code.rfind("}")]
+    return len([line for line in body.splitlines() if line.strip()]) <= 1
 
 
 def _make_entity_id(ent: GraphEntity) -> str:

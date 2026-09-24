@@ -226,7 +226,7 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
             log.warning("No se pudo actualizar clon local de %s: %s", full_repo_name, exc)
 
         token = get_installation_token_for_repo(owner, repo)
-        read_counts = {"clon": 0, "api": 0}
+        read_counts = {"clon": 0, "api": 0, "vendor": 0}
 
         def read_file(path: str) -> str | None:
             """Lee del clon local; si no está ahí, de la API de GitHub."""
@@ -281,6 +281,13 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                     content = read_file(file_info["path"])
                     if not content or not content.strip():
                         log.debug(f"Archivo vacío o sin contenido: {file_info['path']}")
+                        processed = True
+                        continue
+
+                    vendor_reason = _vendor_asset_reason(file_info["path"], content)
+                    if vendor_reason:
+                        log.debug("Librería de terceros omitida (%s): %s", vendor_reason, file_info["path"])
+                        read_counts["vendor"] += 1
                         processed = True
                         continue
 
@@ -363,7 +370,10 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
             log.error("Error creando relaciones en Neo4j: %s", exc)
 
         log.info(f"Indexación completa: {full_repo_name} @ {branch} — {total_files} archivos, {total_entities} entidades, {total_chunks} chunks guardados")
-        log.info("Archivos leídos: %d desde el clon, %d desde la API de GitHub", read_counts["clon"], read_counts["api"])
+        log.info(
+            "Archivos leídos: %d desde el clon, %d desde la API de GitHub | librerías JS/CSS omitidas: %d",
+            read_counts["clon"], read_counts["api"], read_counts["vendor"],
+        )
         success = True
         details = f"Archivos procesados: {total_files}\nEntidades: {total_entities}\nChunks: {total_chunks}"
 
@@ -376,6 +386,34 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
             send_index_notification(full_repo_name, branch, success, details)
         except Exception as ne:
             log.error("Error al enviar notificación de indexación: %s", ne)
+
+
+_LICENSE_HEADER_RE = re.compile(
+    r"/\*!|@license|@preserve|Licensed under|Released under the MIT|Copyright\s*(?:\(c\)|©)|\(c\)\s*\d{4}",
+    re.IGNORECASE,
+)
+_LIB_DIR_RE = re.compile(
+    r"(?:^|/)(?:webapp|static|public|resources|assets)/(?:.*/)?(?:lib|libs|vendor|vendors|plugins|third[-_]?party)/",
+    re.IGNORECASE,
+)
+
+
+def _vendor_asset_reason(file_path: str, content: str) -> str | None:
+    """
+    JS/CSS de terceros (ExtJS, jQuery, Bootstrap...): muchos chunks inútiles que
+    además ensucian la búsqueda. Medido en tnsERPTareasPDN: 16.585 de 21.631 chunks
+    eran librerías; con esta regla quedan 331 y se conserva todo el JS propio.
+    """
+    if not file_path.lower().endswith((".js", ".css")):
+        return None
+    if _LIB_DIR_RE.search(file_path):
+        return "carpeta de librerías"
+    head = content[:5000]
+    if _LICENSE_HEADER_RE.search(head[:2000]):
+        return "cabecera de licencia"
+    if any(len(line) > 1000 for line in head.splitlines()):
+        return "minificado"
+    return None
 
 
 def _detect_language_from_path(file_path: str) -> str | None:

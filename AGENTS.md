@@ -245,6 +245,11 @@ Los servicios internos se exponen entre sí por nombre de red Docker (ej: `http:
 
 ## 9. Estrategias de chunking
 
+**Qué NO se indexa (medido en tnsERPTareasPDN: de 64.109 a 5.262 chunks):**
+- Carpetas `target/`, `build/`, `dist/`, `node_modules/`, `vendor/` y archivos `*.min.js`/`*.min.css` (`github_client.IGNORED_PATHS`).
+- JS/CSS de terceros (`main._vendor_asset_reason`): dentro de `lib/`, `libs/`, `vendor/`, `plugins/`… bajo `webapp/`, `static/`, `resources/`; con cabecera de licencia; o minificados.
+- Entidades triviales no generan chunk/embedding (`ast_parser._is_trivial`): campos, getters/setters de una línea y `equals`/`hashCode`/`toString`. Siguen existiendo como nodos del grafo y el chunk de su clase ya los contiene.
+
 El archivo `chunker.py` implementa splitting inteligente por lenguaje:
 
 - **Regla de oro**: si el archivo entero cabe en `CHUNK_SIZE` (8000 caracteres), va en **un solo chunk**.
@@ -285,7 +290,7 @@ Cada chunk incluye `embed_text` enriquecido con metadatos del repo, rama, archiv
 - `USES_SQL` — método → archivo `.sql` que ejecuta (directo o vía constante)
 - `READS` / `WRITES` — `SqlFile` o método (SQL en strings) → `Table`
 
-Las relaciones se crean al final de la indexación, cuando ya existen todos los nodos del repo (`graph_store.upsert_relations`). El destino se busca por nombre dentro del mismo repo/rama y se valida su tipo: `HAS_METHOD`/`HAS_FIELD` solo dentro del mismo archivo, `CALLS` solo a métodos. `CALLS` (Java) se resuelve por el tipo del receptor (`code_links.resolve_call_owners`): `servicio.metodo()` enlaza solo con métodos de la clase del campo/parámetro/variable `servicio` o de las clases que la implementan/extienden; `Clase.metodo()` con esa clase; `metodo()` con la propia clase. Si el tipo no se puede inferir (cadenas `a().b()`, lambdas) se enlaza por nombre con todos los homónimos del mismo lenguaje. Los `CALLS` se crean en una segunda pasada, después de `HAS_METHOD`/`IMPLEMENTS`. Las tablas, los SQL y las rutas HTTP se extraen con expresiones regulares (`code_links.py`).
+Las relaciones se crean al final de la indexación, cuando ya existen todos los nodos del repo (`graph_store.upsert_relations`). El destino se busca por nombre dentro del mismo repo/rama y se valida su tipo: `HAS_METHOD`/`HAS_FIELD` solo dentro del mismo archivo, `CALLS` solo a métodos. `CALLS` (Java) se resuelve por el tipo del receptor (`code_links.resolve_call_owners`): `servicio.metodo()` enlaza solo con métodos de la clase del campo/parámetro/variable `servicio` o de las clases que la implementan/extienden; `Clase.metodo()` con esa clase; `metodo()` con la propia clase. Si el tipo no se puede inferir (cadenas `a().b()`, lambdas) se enlaza por nombre con los homónimos del mismo lenguaje, solo si son 3 o menos (`graph_store._MAX_AMBIGUOUS_CALL_TARGETS`); las llamadas a `equals`/`hashCode`/`toString`/`getClass` no se enlazan. Los `CALLS` se crean en una segunda pasada, después de `HAS_METHOD`/`IMPLEMENTS`. Las tablas, los SQL y las rutas HTTP se extraen con expresiones regulares (`code_links.py`).
 
 ### IDs
 Los IDs de entidad siguen el formato:
