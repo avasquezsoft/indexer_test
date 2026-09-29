@@ -224,6 +224,7 @@ Los servicios internos se exponen entre sí por nombre de red Docker (ej: `http:
 | `POST` | `/search-graph` | Búsqueda híbrida vector + grafo + keyword |
 | `GET`  | `/graph/entity/{name}` | Busca entidad por nombre y devuelve relaciones |
 | `GET`  | `/graph/related/{entity_id}` | Vecinos en el grafo hasta cierta profundidad |
+| `GET`  | `/graph/search?term=` | Entidades cuyo nombre contiene un término (ej. `cegid` → campo `emCegid` y sus clases) |
 | `GET`  | `/graph/usages/{name}` | Quién usa/llama/inyecta una clase, método o tabla |
 | `GET`  | `/graph/flow/{name}` | Flujo hacia abajo: llamadas → SQL → tablas (`depth` 1-6) |
 | `GET`  | `/sql/table/{table}` | Qué `.sql` y métodos leen o escriben una tabla |

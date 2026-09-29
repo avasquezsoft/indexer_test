@@ -146,6 +146,9 @@ services:
       - "3502:8080"
     volumes:
       - webui_data:/app/backend/data
+    configs:
+      - source: owui_loader
+        target: /app/build/static/loader.js
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@tennis-iniciativas-documentacion-ia-bi83zv-postgres-1:5432/${POSTGRES_DB}
       OPENAI_API_BASE_URL: http://litellm:4000/v1
@@ -209,6 +212,39 @@ configs:
       general_settings:
         master_key: os.environ/LITELLM_MASTER_KEY
         database_url: os.environ/DATABASE_URL
+
+  owui_loader:
+    content: |
+        // Open WebUI -> /app/backend/open_webui/static/loader.js
+        // SSO desde tennis-ia: al cargar dentro del iframe avisa "listo"; tennis-ia
+        // responde con el token de Open WebUI que el backend obtuvo en el login.
+        (() => {
+          const TENNIS_IA = [
+            "http://localhost:5173",
+            "http://172.18.20.132:3503",
+            "http://172.18.20.134:3503",
+            "http://tnsnow.tennis.com.co:3503/"
+          ];
+          const permitido = (o) =>
+            TENNIS_IA.includes(o) || /^https:\/\/([a-z0-9-]+\.)*tennis\.com\.co$/.test(o);
+  
+          if (window.parent === window) return;
+  
+          window.addEventListener("message", async (e) => {
+            if (!permitido(e.origin) || e.source !== window.parent) return;
+            if (e.data?.type !== "tns-owui-token" || typeof e.data.token !== "string") return;
+            const token = e.data.token;
+            if (token === localStorage.token) return;
+            const ok = await fetch("/api/v1/auths/", {
+              headers: { Authorization: `Bearer $${token}` },
+            }).then((r) => r.ok, () => false);
+            if (!ok) return;
+            localStorage.token = token;
+            location.replace("/");
+          });
+  
+          window.parent.postMessage({ type: "tns-owui-ready" }, "*");
+        })();
 
 volumes:
   qdrant_data:
