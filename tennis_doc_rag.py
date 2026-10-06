@@ -422,6 +422,12 @@ _CAMEL_HUMP_RE = re.compile(r"[a-z0-9][A-Z]")
 
 _BACKTICK_RE = re.compile(r"`([A-Za-z_][\w.]*)(?:\(\))?`")
 
+# Archivo pedido por nombre o ruta: UserMapper.xml, src/main/resources/application.yml
+_FILE_RE = re.compile(
+    r"(?<![\w.-])(?:[\w.-]+/)*([\w-]+\.(?:java|xml|sql|properties|ya?ml|json|html|jspf?|js|ts|py|md|txt))\b",
+    re.IGNORECASE,
+)
+
 # save(  obj.save(  — sin espacio antes del paréntesis
 _METHOD_CALL_RE = re.compile(r"(?<![\w])([a-zA-Z_][a-zA-Z0-9_]*)\(")
 
@@ -1138,6 +1144,8 @@ class Filter:
         return {
             "strategy": strategy,
             "entities": entities,
+            # Sobre la consulta original: _REPO_RE se come rutas como "mapper/Foo.xml".
+            "files": list(dict.fromkeys(f.lower() for f in _FILE_RE.findall(query)))[:3],
             "methods": methods,
             "is_sql": is_sql,
             "is_architecture": is_architecture,
@@ -1555,9 +1563,14 @@ class Filter:
 
         keywords = self._extract_keywords(query)
 
-        if not repo or not (keywords or analysis["entities"] or analysis["methods"]):
+        files = analysis.get("files", [])
+
+        if not repo or not (keywords or analysis["entities"] or analysis["methods"] or files):
 
             return []
+
+        # El archivo pedido puede ocupar casi todo el presupuesto (el resto es para el mapa).
+        exact_max = int(self.valves.max_context_tokens * self.valves.chars_per_token * 0.75)
 
         try:
 
@@ -1567,10 +1580,15 @@ class Filter:
                     "repo": repo,
                     "branch": branch,
                     "keywords": keywords,
-                    "entities": analysis["entities"],
+                    # "UserMapper.xml" pide ese archivo, no también UserMapper.java
+                    "entities": [
+                        e for e in analysis["entities"]
+                        if e.lower() not in {f.rsplit(".", 1)[0] for f in files}
+                    ] + files,
                     "methods": analysis["methods"],
                     "max_files": self.valves.clone_max_files,
                     "max_chars_per_file": self.valves.clone_max_chars,
+                    "max_chars_exact": max(exact_max, self.valves.clone_max_chars),
                 },
                 timeout=max(60, self.valves.request_timeout),
             )
@@ -1717,9 +1735,9 @@ class Filter:
 
         self._status("🔎 Buscando en el código indexado…")
 
-        # Si se nombra una clase o método, el archivo real se busca en el clon
-        # en paralelo: el índice puede tener la clase partida o truncada.
-        named = bool(repo and (entity_names or analysis["methods"]))
+        # El clon se busca siempre en paralelo: si se nombra una clase, método o
+        # archivo trae el archivo real (el índice puede tenerlo partido o truncado);
+        # si no, aporta archivos por palabras clave para cuando el índice se queda corto.
 
         with ThreadPoolExecutor(max_workers=5) as pool:
 
@@ -1741,7 +1759,7 @@ class Filter:
 
             fut_clone = (
                 pool.submit(self._search_clone, repo, branch, retrieval_query or query, analysis, errors)
-                if named
+                if repo
                 else None
             )
 
@@ -1778,16 +1796,6 @@ class Filter:
                     lists[source] = [
                         r for r in lists[source] if r.get("file_path") not in exact_files
                     ]
-
-        total = sum(len(v) for v in lists.values())
-
-        total_chars = sum(len(r.get("text") or "") for v in lists.values() for r in v)
-
-        if repo and not fut_clone and (total < 6 or total_chars < 12000):
-
-            self._status("📂 Buscando por palabras clave en el repositorio…")
-
-            lists["clone"] = self._search_clone(repo, branch, retrieval_query or query, analysis, errors)
 
         fused = self._fuse(lists)
 
@@ -2282,12 +2290,14 @@ class Filter:
 
                 continue
 
-            # Los archivos del clon ya vienen recortados/condensados por el indexer.
-            limit = (
-                self.valves.clone_max_chars
-                if result.get("full_file")
-                else self.valves.max_chars_per_chunk
-            )
+            # Los archivos del clon ya vienen recortados/condensados por el indexer;
+            # el archivo pedido por nombre puede usar todo el presupuesto que quede.
+            if "clone_exact" in result.get("_sources", ()):
+                limit = budget
+            elif result.get("full_file"):
+                limit = self.valves.clone_max_chars
+            else:
+                limit = self.valves.max_chars_per_chunk
 
             truncated = len(text) > limit
 
@@ -2408,6 +2418,16 @@ class Filter:
             "no uses otras fuentes."
         )
 
+        condensed_rule = (
+            "Si un archivo viene como \"Vista condensada\" o truncado y te falta una "
+            "parte, léelo completo con read_file antes de decir que no tienes el contexto."
+            if tools_on
+            else "Si un archivo viene como \"Vista condensada\", tienes su estructura y "
+            "las firmas de todos sus métodos: responde con eso, y si te falta el cuerpo de "
+            "un método di cuál es y pide al usuario que lo pregunte por su nombre "
+            "(ej. `Clase.metodo`) para recibirlo completo."
+        )
+
         map_section = (
             f"\nMAPA DEL GRAFO\n==============\n\n{graph_map}\n" if graph_map else ""
         )
@@ -2424,7 +2444,7 @@ Reglas:
    varios fragmentos.
 2. No inventes clases, métodos, endpoints, tablas ni comportamientos. Si
    infieres algo, márcalo como inferencia.
-3. Si el contexto no alcanza para responder, dilo claramente.
+3. Si el contexto no alcanza para responder, dilo claramente. {condensed_rule}
 4. {hint}
 {output_rule}
 6. Termina con "### Fuentes": los archivos que usaste, sin inventar ninguno.

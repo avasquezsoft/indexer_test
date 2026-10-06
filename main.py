@@ -994,6 +994,7 @@ class SearchCloneRequest(BaseModel):
     methods: list[str] = []    # métodos mencionados: su cuerpo se incluye completo
     max_files: int = 20
     max_chars_per_file: int = 40000
+    max_chars_exact: int = 0   # límite para el archivo pedido por nombre (0 = max_chars_per_file)
 
 
 @app.post("/search-clone", dependencies=[Depends(verify_api_key)])
@@ -1027,6 +1028,7 @@ async def search_clone(req: SearchCloneRequest):
         req.methods,
         req.max_files,
         req.max_chars_per_file,
+        req.max_chars_exact,
     )
     log.info(
         "Búsqueda en clon %s @ %s: %d archivos (exactos=%d, keywords=%s, entidades=%s)",

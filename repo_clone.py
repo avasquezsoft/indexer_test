@@ -125,6 +125,7 @@ def search_clone(
     methods: list[str],
     max_files: int,
     max_chars_per_file: int,
+    max_chars_exact: int = 0,
 ) -> list[dict]:
     """
     Busca archivos del clon relevantes para la pregunta, ordenados por:
@@ -133,6 +134,8 @@ def search_clone(
     3. alguna keyword aparece en el nombre del archivo.
 
     Los archivos que superan max_chars_per_file se condensan en vez de cortarse.
+    El archivo pedido por nombre usa max_chars_exact (si se pasa) para que llegue
+    completo. Una entidad con extensión ("UserMapper.xml") solo coincide con ese archivo.
     """
     clone_path = _get_clone_path(repo, branch)
     entity_names = {e.lower() for e in entities}
@@ -153,7 +156,7 @@ def search_clone(
                     content = f.read().lower()
             except OSError:
                 continue
-            exact = stem.lower() in entity_names
+            exact = stem.lower() in entity_names or fname.lower() in entity_names
             hits = sum(1 for t in terms if t in content)
             if not exact and hits == 0:
                 continue
@@ -167,8 +170,9 @@ def search_clone(
         with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
         original_chars = len(content)
-        if original_chars > max_chars_per_file:
-            content = _condense(content, fpath, methods, terms, max_chars_per_file)
+        limit = max_chars_exact if exact and max_chars_exact else max_chars_per_file
+        if original_chars > limit:
+            content = _condense(content, fpath, methods, terms, limit)
         results.append({
             "file_path": os.path.relpath(fpath, clone_path).replace("\\", "/"),
             "content": content,

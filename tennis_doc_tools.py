@@ -57,6 +57,14 @@ class Tools:
             default=30000, description="Máximo de caracteres que devuelve cada función."
         )
 
+        max_file_chars: int = Field(
+            default=120000,
+            description=(
+                "Máximo de caracteres que devuelve read_file (un archivo entero). "
+                "Debe caber en la ventana de contexto del modelo."
+            ),
+        )
+
     def __init__(self):
 
         self.valves = self.Valves()
@@ -130,9 +138,9 @@ class Tools:
 
         return response.json()
 
-    def _cap(self, text):
+    def _cap(self, text, limit=None):
 
-        limit = self.valves.max_output_chars
+        limit = limit or self.valves.max_output_chars
 
         if len(text) <= limit:
 
@@ -477,7 +485,7 @@ class Tools:
 
         await self._status(__event_emitter__, "Archivo leído", True)
 
-        return self._cap(f"Archivo: {file_path}\n\n{content}")
+        return self._cap(f"Archivo: {file_path}\n\n{content}", self.valves.max_file_chars)
 
     async def find_usages(
         self,
