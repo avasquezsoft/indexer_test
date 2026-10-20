@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS = {
     # Lenguajes principales
     ".py", ".js", ".ts", ".jsx", ".tsx",
+    ".mjs", ".cjs", ".mts", ".cts",  # módulos ES/CommonJS (vite.config.mjs, etc.)
     ".java", ".cs", ".go", ".rb", ".php",
     ".sql", ".graphql", ".proto",
     ".md", ".txt",
@@ -25,6 +26,9 @@ SUPPORTED_EXTENSIONS = {
     ".properties", ".conf", ".cfg", ".ini",
     ".jsp", ".jspf", ".tag",
     ".vue", ".svelte",
+    # .NET: vistas, proyectos, web.config/app.config, servicios WCF
+    ".cshtml", ".razor", ".csproj", ".config", ".svc", ".asmx",
+    ".vb", ".vbproj", ".aspx", ".ascx", ".master", ".asax",  # VB.NET y WebForms (solo texto)
     ".ftl", ".hbs", ".mustache", ".twig",
     # Shell / scripts
     ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
@@ -37,6 +41,7 @@ SUPPORTED_EXTENSIONS = {
 IGNORED_PATHS = {
     "node_modules", ".git", "dist", "build", "target",
     "__pycache__", ".next", "coverage", "vendor",
+    "obj", ".vs",  # salidas de compilación e IDE de .NET
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml"
 }
 
@@ -161,7 +166,13 @@ def get_repo_files(token: str, owner: str, repo: str, ref: str = "HEAD") -> list
             params={"recursive": "1"},
         )
         response.raise_for_status()
-        tree = response.json().get("tree", [])
+        data = response.json()
+        tree = data.get("tree", [])
+        if data.get("truncated"):
+            log.warning(
+                "Árbol de %s/%s @ %s truncado por GitHub: solo %d entradas; faltan archivos",
+                owner, repo, ref, len(tree),
+            )
 
     # Filtramos solo archivos con extensiones soportadas
     files = []

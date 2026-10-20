@@ -53,7 +53,7 @@ Todo el despliegue se realiza mediante **Docker Compose** (`docker-compose.yml`)
 - `fastapi==0.136.1` + `uvicorn==0.34.0`
 - `qdrant-client==1.17.1`
 - `neo4j==5.27.0`
-- `tree-sitter==0.24.0` + bindings para Java, Python, JavaScript, TypeScript, Go
+- `tree-sitter==0.24.0` + bindings para Java, Python, JavaScript, TypeScript (y TSX), Go, C# (`tree-sitter-c-sharp==0.23.0`: la 0.23.1+ usa ABI 15, incompatible con tree-sitter 0.24)
 - `httpx==0.28.1`
 - `pydantic==2.10.4`
 - `fpdf2==2.8.3` (generación de PDFs)
@@ -80,10 +80,10 @@ Todo el despliegue se realiza mediante **Docker Compose** (`docker-compose.yml`)
 
 ### Indexación (pipeline)
 1. Se dispara vía webhook de GitHub (`/webhook`) o manualmente (`POST /index`).
-2. `github_client.py` obtiene token de instalación y lista todos los archivos del repo/rama.
+2. Se clona el repo/rama y se listan sus archivos desde el clon (`repo_clone.list_files`); la API de GitHub (`github_client.get_repo_files`) solo si el clon falla, porque trunca el árbol en repos grandes.
 3. Para cada archivo:
    - Se detecta el lenguaje por extensión.
-   - Se parsea con `ast_parser.py` (Tree-sitter o JavaParser).
+   - Se parsea con `ast_parser.py` (Tree-sitter o JavaParser). Si el AST no da entidades (scripts, `module-info.java`), el archivo se indexa como texto con `chunker.py`; los lenguajes sin parser AST también.
    - Se generan **entidades** (clases, métodos, campos, funciones) y **chunks**.
    - Los chunks se enriquecen con texto para embedding (`embed_text`).
    - Si es Java, se resuelven referencias a archivos `.sql` y se adjunta el contenido SQL inline.
@@ -234,7 +234,7 @@ Los servicios internos se exponen entre sí por nombre de red Docker (ej: `http:
 | `POST` | `/pdf` | Genera PDF a partir de texto/markdown |
 | `POST` | `/markdown` | Genera archivo `.md` descargable |
 | `GET`  | `/health` | Health check con estado de Qdrant, Neo4j y JavaParser |
-| `GET`  | `/repos` | Lista repos únicos indexados en Neo4j |
+| `GET`  | `/repos` | Lista repos indexados en Neo4j con sus ramas (`{repo, branches}`); los plugins la usan para no buscar en una rama no indexada |
 | `GET`  | `/repos-available` | Lista repos a los que la GitHub App tiene acceso (soporta multi-org) |
 | `GET`  | `/debug/files` | Lista archivos que serían indexados (sin indexar) |
 | `GET`  | `/debug/files-indexed` | Lista archivos ya indexados en Qdrant |

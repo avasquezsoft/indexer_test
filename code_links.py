@@ -276,7 +276,7 @@ def resolve_call_owners(entities: list[GraphEntity]) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Endpoints HTTP (Spring MVC y JAX-RS)
+# Endpoints HTTP (Spring MVC, JAX-RS y ASP.NET)
 # ═══════════════════════════════════════════════════════════════
 
 _SPRING_RE = re.compile(r"@(Get|Post|Put|Delete|Patch|Request)Mapping\b\s*(\((?:[^()]|\([^()]*\))*\))?")
@@ -285,6 +285,15 @@ _REQUEST_METHOD_RE = re.compile(r"RequestMethod\.(\w+)")
 _QUOTED_RE = re.compile(r'"([^"]*)"')
 _JAXRS_PATH_RE = re.compile(r'@Path\s*\(\s*(?:value\s*=\s*)?"([^"]*)"')
 _JAXRS_VERB_RE = re.compile(r"@(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b")
+# [HttpGet("{id}")], [Route("api/[controller]")], [HttpPost, Authorize]
+_ASPNET_RE = re.compile(
+    r'(?<=[\[,])\s*(Http(?:Get|Post|Put|Delete|Patch|Head|Options)|Route)\b\s*(?:\(\s*(?:template\s*:\s*)?"([^"]*)")?'
+)
+# FastAPI / Flask: @router.get("/x"), @app.post("/x"), @bp.route("/x", methods=["POST"])
+_PY_ROUTE_RE = re.compile(
+    r"@\s*[\w.]+\.(get|post|put|delete|patch|head|options|route|api_route)\s*\(\s*(?:path\s*=\s*)?[rf]?[\"']([^\"']*)[\"']([^\n]*)"
+)
+_PY_METHODS_RE = re.compile(r"[\"'](GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)[\"']", re.IGNORECASE)
 
 
 def _mappings(header: str) -> tuple[list[str], list[str]]:
@@ -300,6 +309,18 @@ def _mappings(header: str) -> tuple[list[str], list[str]]:
             verbs.append(kind.upper())
     paths += _JAXRS_PATH_RE.findall(header)
     verbs += _JAXRS_VERB_RE.findall(header)
+    for attr, path in _ASPNET_RE.findall(header):
+        if path:
+            paths.append(path)
+        if attr != "Route":
+            verbs.append(attr[len("Http"):].upper())
+    for verb, path, rest in _PY_ROUTE_RE.findall(header):
+        paths.append(path)
+        if verb in ("route", "api_route"):
+            # Flask sin methods= solo atiende GET
+            verbs += [m.upper() for m in _PY_METHODS_RE.findall(rest)] or ["GET"]
+        else:
+            verbs.append(verb.upper())
     return verbs, paths
 
 
@@ -324,10 +345,13 @@ def add_routes(entities: list[GraphEntity]) -> None:
         if cls.type not in ("Class", "Interface"):
             continue
         _, base_paths = _mappings(_header(cls.code, rf"\b(?:class|interface)\s+{re.escape(cls.name)}\b"))
-        classes.append((cls, base_paths))
+        # ASP.NET: [Route("api/[controller]")] usa el nombre de la clase sin "Controller"
+        controller = cls.name.removesuffix("Controller")
+        classes.append((cls, [p.replace("[controller]", controller) for p in base_paths]))
 
     for method in entities:
-        if method.type != "Method":
+        # Function: en Python los endpoints suelen ser funciones de módulo
+        if method.type not in ("Method", "Function"):
             continue
         verbs, paths = _mappings(_header(method.code, rf"\b{re.escape(method.name)}\s*\("))
         if not verbs:
@@ -342,6 +366,6 @@ def add_routes(entities: list[GraphEntity]) -> None:
             f"{verb} {_join(base, path)}"
             for verb in dict.fromkeys(verbs)
             for base in (base_paths or [""])
-            for path in (paths or [""])
+            for path in (p.replace("[action]", method.name) for p in (paths or [""]))
         ]
         method.route = ", ".join(dict.fromkeys(routes))

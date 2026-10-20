@@ -121,6 +121,27 @@ class Tools:
 
         return sorted(repos, key=lambda r: r["name"].lower())
 
+    def _branch_for(self, repo):
+        """La rama por defecto si el repo está indexado en ella; si no, su primera rama indexada."""
+
+        try:
+
+            for item in self._repos():
+
+                if item["name"] == repo and item.get("branch"):
+
+                    indexed = [b.strip() for b in str(item["branch"]).split(",") if b.strip()]
+
+                    if indexed and self.valves.default_branch not in indexed:
+
+                        return indexed[0]
+
+        except Exception:
+
+            pass
+
+        return self.valves.default_branch
+
     def _get_json(self, endpoint, params=None, timeout=30):
 
         response = requests.get(
@@ -467,7 +488,7 @@ class Tools:
                 json={
                     "repo": repo,
                     "file_path": file_path.strip().strip("`"),
-                    "branch": branch or self.valves.default_branch,
+                    "branch": branch or self._branch_for(repo),
                 },
                 headers=self._headers(),
                 timeout=60,

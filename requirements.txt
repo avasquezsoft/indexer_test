@@ -15,3 +15,4 @@ tree-sitter-typescript==0.23.2
 tree-sitter-go==0.23.4
 neo4j==5.27.0
 dulwich==1.2.15
+tree-sitter-c-sharp==0.23.0

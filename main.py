@@ -245,8 +245,16 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
             if path not in sql_cache:
                 sql_cache[path] = read_file(path)
             return sql_cache[path]
-        files = get_repo_files(token, owner, repo, ref=branch)
-        log.info(f"Encontrados {len(files)} archivos en {full_repo_name} @ {branch}")
+        # Del clon si existe: el árbol de la API de GitHub se trunca en repos grandes
+        # (más de 100.000 entradas o 7 MB) y devuelve solo una parte de los archivos.
+        if clone_ok:
+            files = repo_clone.list_files(full_repo_name, branch)
+        else:
+            files = get_repo_files(token, owner, repo, ref=branch)
+        log.info(
+            f"Encontrados {len(files)} archivos en {full_repo_name} @ {branch} "
+            f"(desde {'el clon' if clone_ok else 'la API de GitHub'})"
+        )
 
         client = get_client()
         # Asegurar que la colección existe (puede haber sido borrada manualmente)
@@ -299,6 +307,10 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
                         entities, chunks = ast_parser.parse_file_to_chunks_and_entities(
                             content, language, full_repo_name, branch, file_info["path"]
                         )
+                        if not chunks:
+                            # Sin clases ni funciones (scripts, module-info.java, archivos
+                            # de config en .py/.js): se indexa como texto en vez de perderlo
+                            chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
                     else:
                         # Fallback: chunking clásico para lenguajes no soportados por AST
                         chunks = chunk_file(content, file_info["path"], full_repo_name, branch=branch)
@@ -323,8 +335,9 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
                     if language:
                         all_tables |= code_links.add_sql_links(entities, resolve_sql)
-                        if language == "java":
+                        if language in ("java", "csharp", "python"):
                             code_links.add_routes(entities)
+                        if language == "java":
                             code_links.resolve_call_owners(entities)
                         _annotate_chunks(chunks, entities)
 
@@ -420,7 +433,8 @@ def _detect_language_from_path(file_path: str) -> str | None:
     ext = file_path.lower().split(".")[-1] if "." in file_path else ""
     mapping = {
         "java": "java", "py": "python", "js": "javascript", "ts": "typescript",
-        "jsx": "javascript", "tsx": "typescript", "go": "go",
+        "jsx": "javascript", "tsx": "typescript", "go": "go", "cs": "csharp",
+        "mjs": "javascript", "cjs": "javascript", "mts": "typescript", "cts": "typescript",
     }
     return mapping.get(ext)
 
@@ -1155,8 +1169,12 @@ async def list_indexed_repos():
     try:
         driver = graph_store.get_driver()
         with driver.session() as session:
-            result = session.run("MATCH (e:CodeEntity) RETURN DISTINCT e.repo AS repo ORDER BY repo")
-            repos = [record["repo"] for record in result if record["repo"]]
+            # Con ramas: los plugins las usan para no buscar en una rama que no está indexada
+            result = session.run(
+                "MATCH (e:CodeEntity) WHERE e.repo IS NOT NULL "
+                "RETURN e.repo AS repo, collect(DISTINCT e.branch) AS branches ORDER BY repo"
+            )
+            repos = [{"repo": record["repo"], "branches": record["branches"]} for record in result]
         return {"repos": repos}
     except Exception as exc:
         log.error(f"Error listando repos: {exc}")

@@ -14,14 +14,17 @@ from pydantic import BaseModel, Field
 
 # ── Tree-sitter ──
 from tree_sitter import Language, Parser
+from tree_sitter_c_sharp import language as cs_lang
 from tree_sitter_go import language as go_lang
 from tree_sitter_java import language as java_lang
 from tree_sitter_javascript import language as js_lang
 from tree_sitter_python import language as py_lang
-from tree_sitter_typescript import language_typescript
+from tree_sitter_typescript import language_tsx, language_typescript
 
 # Compatibilidad con tree-sitter 0.24+ (nueva API Language/Parser)
 _ts_lang = Language(language_typescript())
+_tsx_lang = Language(language_tsx())  # .tsx: la gramática typescript no entiende JSX
+_cs_lang = Language(cs_lang())
 _go_lang = Language(go_lang())
 _java_lang = Language(java_lang())
 _js_lang = Language(js_lang())
@@ -79,6 +82,8 @@ _LANGUAGE_MAP = {
     "python": _py_lang,
     "javascript": _js_lang,
     "typescript": _ts_lang,
+    "tsx": _tsx_lang,
+    "csharp": _cs_lang,
     "go": _go_lang,
 }
 
@@ -181,133 +186,122 @@ def _extract_docstring(source: str, node) -> str | None:
 # Tree-sitter: extractores por lenguaje
 # ═══════════════════════════════════════════════════════════════
 
+def _collect_calls(source: str, node, call_type: str, member_type: str, member_field: str) -> list[str]:
+    """
+    Nombres de las funciones/métodos llamados en cualquier punto de node (no solo
+    sus hijos directos). En obj.metodo() devuelve "metodo".
+    Python: ("call", "attribute", "attribute"); JS/TS: ("call_expression", "member_expression", "property").
+    """
+    called: list[str] = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == call_type:
+            func = current.child_by_field_name("function")
+            if func is not None and func.type == member_type:
+                func = func.child_by_field_name(member_field)
+            if func is not None and func.type in ("identifier", "property_identifier"):
+                target = _node_text(source, func)
+                if target not in called:
+                    called.append(target)
+        stack.extend(current.children)
+    return called
+
+
 def _extract_python(source: str, tree, repo: str, branch: str, file_path: str) -> list[GraphEntity]:
     entities: list[GraphEntity] = []
-    root = tree.root_node
+
+    def entity(ent_type: str, defn, outer) -> GraphEntity:
+        # outer = decorated_definition si hay decoradores: el código los incluye (rutas, @staticmethod)
+        name_node = defn.child_by_field_name("name")
+        body = defn.child_by_field_name("body")
+        header = source[defn.start_byte : body.start_byte if body is not None else defn.end_byte]
+        ent = GraphEntity(
+            type=ent_type,
+            name=_node_text(source, name_node) if name_node else "",
+            file_path=file_path,
+            repo=repo,
+            branch=branch,
+            language="python",
+            start_line=outer.start_point[0] + 1,
+            end_line=outer.end_point[0] + 1,
+            signature=header.strip().rstrip(":").strip(),
+            docstring=_extract_docstring(source, outer),
+            code=_node_text(source, outer),
+        )
+        for dec in _children_by_type(outer, "decorator"):
+            ent.annotations.append(_node_text(source, dec).lstrip("@").split("(")[0].strip())
+        return ent
+
+    def unwrap(node):
+        """(definición, nodo externo): desenvuelve @decorador def/class."""
+        if node.type == "decorated_definition":
+            defn = node.child_by_field_name("definition")
+            return (defn, node) if defn is not None else (None, node)
+        return node, node
 
     def walk(node, parent_name: str = ""):
-        if node.type in ("class_definition",):
-            name_node = _child_by_type(node, "identifier")
-            name = _node_text(source, name_node) if name_node else ""
-            body = _child_by_type(node, "block")
-            sig = _node_text(source, node).split(":")[0].strip()
-            cls_ent = GraphEntity(
-                type="Class",
-                name=name,
-                file_path=file_path,
-                repo=repo,
-                branch=branch,
-                language="python",
-                start_line=node.start_point[0] + 1,
-                end_line=node.end_point[0] + 1,
-                signature=sig,
-                docstring=_extract_docstring(source, node),
-                code=_node_text(source, node),
-            )
+        defn, outer = unwrap(node)
+        if defn is not None and defn.type == "class_definition":
+            cls_ent = entity("Class", defn, outer)
+            name = cls_ent.name
             # Herencia
-            for arg in _children_by_type(node, "argument_list"):
+            for arg in _children_by_type(defn, "argument_list"):
                 for child in arg.children:
-                    if child.type == "identifier":
+                    if child.type in ("identifier", "attribute"):
                         cls_ent.relations.append(Relation(
-                            type="EXTENDS", target_name=_node_text(source, child), target_type="Class"
+                            type="EXTENDS", target_name=_node_text(source, child).split(".")[-1], target_type="Class"
                         ))
-            # Decoradores (anotaciones)
-            for dec in _children_by_type(node, "decorator"):
-                cls_ent.annotations.append(_node_text(source, dec).lstrip("@").split("(")[0])
-
-            # Métodos y campos dentro de la clase
-            if body:
-                for child in body.children:
-                    if child.type == "function_definition":
-                        mname_node = _child_by_type(child, "identifier")
-                        mname = _node_text(source, mname_node) if mname_node else ""
-                        msig = _node_text(source, child).split(":")[0].strip()
-                        ment = GraphEntity(
-                            type="Method",
-                            name=mname,
+            body = defn.child_by_field_name("body")
+            for child in body.children if body else []:
+                mdefn, mouter = unwrap(child)
+                if mdefn is not None and mdefn.type == "function_definition":
+                    ment = entity("Method", mdefn, mouter)
+                    ment.relations.extend(
+                        Relation(type="CALLS", target_name=t, target_type="Method")
+                        for t in _collect_calls(source, mdefn, "call", "attribute", "attribute")
+                    )
+                    entities.append(ment)
+                    cls_ent.relations.append(Relation(type="HAS_METHOD", target_name=ment.name, target_type="Method"))
+                elif child.type == "expression_statement":
+                    # Atributo de clase: x = ... / x: int = ...
+                    assign = _child_by_type(child, "assignment")
+                    left = assign.child_by_field_name("left") if assign else None
+                    if left is not None and left.type == "identifier":
+                        fname = _node_text(source, left)
+                        entities.append(GraphEntity(
+                            type="Field",
+                            name=fname,
                             file_path=file_path,
                             repo=repo,
                             branch=branch,
                             language="python",
                             start_line=child.start_point[0] + 1,
                             end_line=child.end_point[0] + 1,
-                            signature=msig,
-                            docstring=_extract_docstring(source, child),
                             code=_node_text(source, child),
-                        )
-                        # Llamadas dentro del método
-                        for call in child.children:
-                            if call.type == "call":
-                                func = _child_by_type(call, "identifier")
-                                if func:
-                                    ment.relations.append(Relation(
-                                        type="CALLS", target_name=_node_text(source, func), target_type="Method"
-                                    ))
-                        entities.append(ment)
-                        cls_ent.relations.append(Relation(
-                            type="HAS_METHOD", target_name=mname, target_type="Method"
                         ))
-                    elif child.type == "expression_statement":
-                        # Posible campo de clase (self.x = ...)
-                        assign = _child_by_type(child, "assignment")
-                        if assign:
-                            left = _child_by_type(assign, "attribute")
-                            if left:
-                                attr = _child_by_type(left, "identifier")
-                                if attr:
-                                    fname = _node_text(source, attr)
-                                    fent = GraphEntity(
-                                        type="Field",
-                                        name=fname,
-                                        file_path=file_path,
-                                        repo=repo,
-                                        branch=branch,
-                                        language="python",
-                                        start_line=child.start_point[0] + 1,
-                                        end_line=child.end_point[0] + 1,
-                                        code=_node_text(source, child),
-                                    )
-                                    entities.append(fent)
-                                    cls_ent.relations.append(Relation(
-                                        type="HAS_FIELD", target_name=fname, target_type="Field"
-                                    ))
+                        cls_ent.relations.append(Relation(type="HAS_FIELD", target_name=fname, target_type="Field"))
             entities.append(cls_ent)
-            if body:
-                for child in body.children:
+            # Clases anidadas
+            for child in body.children if body else []:
+                cdefn, _ = unwrap(child)
+                if cdefn is not None and cdefn.type == "class_definition":
                     walk(child, name)
 
-        elif node.type == "function_definition" and not parent_name:
+        elif defn is not None and defn.type == "function_definition" and not parent_name:
             # Función a nivel de módulo
-            name_node = _child_by_type(node, "identifier")
-            name = _node_text(source, name_node) if name_node else ""
-            sig = _node_text(source, node).split(":")[0].strip()
-            fent = GraphEntity(
-                type="Function",
-                name=name,
-                file_path=file_path,
-                repo=repo,
-                branch=branch,
-                language="python",
-                start_line=node.start_point[0] + 1,
-                end_line=node.end_point[0] + 1,
-                signature=sig,
-                docstring=_extract_docstring(source, node),
-                code=_node_text(source, node),
+            fent = entity("Function", defn, outer)
+            fent.relations.extend(
+                Relation(type="CALLS", target_name=t, target_type="Function")
+                for t in _collect_calls(source, defn, "call", "attribute", "attribute")
             )
-            for call in node.children:
-                if call.type == "call":
-                    func = _child_by_type(call, "identifier")
-                    if func:
-                        fent.relations.append(Relation(
-                            type="CALLS", target_name=_node_text(source, func), target_type="Function"
-                        ))
             entities.append(fent)
 
         else:
             for child in node.children:
                 walk(child, parent_name)
 
-    walk(root)
+    walk(tree.root_node)
     return entities
 
 
@@ -448,6 +442,114 @@ def _extract_java_treesitter(source: str, tree, repo: str, branch: str, file_pat
     return entities
 
 
+_CSHARP_TYPES = {
+    "class_declaration": "Class",
+    "interface_declaration": "Interface",
+    "struct_declaration": "Struct",
+    "record_declaration": "Record",
+    "record_struct_declaration": "Record",
+    "enum_declaration": "Enum",
+}
+# IFacturaService, IDisposable: en C# la base no dice si es clase o interfaz; se usa la convención "I" + mayúscula.
+_CSHARP_INTERFACE_NAME_RE = re.compile(r"^I[A-Z]")
+
+
+def _extract_csharp(source: str, tree, repo: str, branch: str, file_path: str) -> list[GraphEntity]:
+    """Extractor Tree-sitter para C#: tipos (con namespaces anidados), métodos, constructores y campos/propiedades."""
+    entities: list[GraphEntity] = []
+
+    def entity(ent_type: str, name: str, node, signature: str | None = None) -> GraphEntity:
+        return GraphEntity(
+            type=ent_type,
+            name=name,
+            file_path=file_path,
+            repo=repo,
+            branch=branch,
+            language="csharp",
+            start_line=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
+            signature=signature,
+            docstring=_extract_docstring(source, node),
+            code=_node_text(source, node),
+        )
+
+    def walk(node):
+        ent_type = _CSHARP_TYPES.get(node.type)
+        if ent_type is None:
+            for child in node.children:
+                walk(child)
+            return
+
+        name_node = node.child_by_field_name("name")
+        name = _node_text(source, name_node) if name_node else ""
+        body = node.child_by_field_name("body")
+        cls_ent = entity(ent_type, name, node, _node_text(source, node).split("{")[0].strip())
+
+        for attr_list in _children_by_type(node, "attribute_list"):
+            for attr in _children_by_type(attr_list, "attribute"):
+                attr_name = attr.child_by_field_name("name")
+                if attr_name:
+                    cls_ent.annotations.append(_node_text(source, attr_name))
+
+        # class Foo : Base, IBar — la base y las interfaces van en la misma lista
+        bases = _child_by_type(node, "base_list")
+        for child in bases.children if bases else []:
+            if child.type not in ("identifier", "generic_name", "qualified_name"):
+                continue
+            target = _node_text(source, child).split("<")[0].split(".")[-1]
+            is_iface = bool(_CSHARP_INTERFACE_NAME_RE.match(target))
+            cls_ent.relations.append(Relation(
+                type="IMPLEMENTS" if is_iface and ent_type != "Interface" else "EXTENDS",
+                target_name=target,
+                target_type="Interface" if is_iface else "Class",
+            ))
+
+        for child in body.children if body else []:
+            if child.type in ("method_declaration", "constructor_declaration"):
+                mname_node = child.child_by_field_name("name")
+                mname = _node_text(source, mname_node) if mname_node else ""
+                mbody = child.child_by_field_name("body")
+                msig = _node_text(source, child)[: (mbody.start_byte - child.start_byte) if mbody else None].strip()
+                ment = entity("Method", mname, child, msig.rstrip(";").strip())
+                # obj.Metodo() → "Metodo": el nombre es el último identificador de la expresión invocada
+                called = []
+                stack = [child]
+                while stack:
+                    current = stack.pop()
+                    if current.type == "invocation_expression":
+                        func = current.child_by_field_name("function")
+                        if func is not None and func.type == "member_access_expression":
+                            func = func.child_by_field_name("name")
+                        if func is not None and func.type == "generic_name":
+                            func = _child_by_type(func, "identifier")
+                        if func is not None and func.type == "identifier":
+                            target = _node_text(source, func)
+                            if target not in called:
+                                called.append(target)
+                    stack.extend(current.children)
+                ment.relations.extend(Relation(type="CALLS", target_name=t, target_type="Method") for t in called)
+                entities.append(ment)
+                cls_ent.relations.append(Relation(type="HAS_METHOD", target_name=mname, target_type="Method"))
+            elif child.type in ("field_declaration", "property_declaration", "enum_member_declaration"):
+                if child.type == "field_declaration":
+                    decl = _child_by_type(child, "variable_declaration")
+                    names = [d.child_by_field_name("name") for d in _children_by_type(decl, "variable_declarator")] if decl else []
+                else:
+                    names = [child.child_by_field_name("name")]
+                for fname_node in names:
+                    fname = _node_text(source, fname_node) if fname_node else ""
+                    entities.append(entity("Field", fname, child))
+                    cls_ent.relations.append(Relation(type="HAS_FIELD", target_name=fname, target_type="Field"))
+
+        entities.append(cls_ent)
+        # Tipos anidados
+        for child in body.children if body else []:
+            walk(child)
+
+    walk(tree.root_node)
+    return entities
+
+
 def _extract_js_ts(source: str, tree, repo: str, branch: str, file_path: str, language: str) -> list[GraphEntity]:
     entities: list[GraphEntity] = []
     root = tree.root_node
@@ -497,13 +599,10 @@ def _extract_js_ts(source: str, tree, repo: str, branch: str, file_path: str, la
                             docstring=_extract_docstring(source, child),
                             code=_node_text(source, child),
                         )
-                        for call in child.children:
-                            if call.type == "call_expression":
-                                func = _child_by_type(call, "identifier")
-                                if func:
-                                    ment.relations.append(Relation(
-                                        type="CALLS", target_name=_node_text(source, func), target_type="Method"
-                                    ))
+                        ment.relations.extend(
+                            Relation(type="CALLS", target_name=t, target_type="Method")
+                            for t in _collect_calls(source, child, "call_expression", "member_expression", "property")
+                        )
                         entities.append(ment)
                         cls_ent.relations.append(Relation(
                             type="HAS_METHOD", target_name=mname, target_type="Method"
@@ -529,13 +628,42 @@ def _extract_js_ts(source: str, tree, repo: str, branch: str, file_path: str, la
                 docstring=_extract_docstring(source, node),
                 code=_node_text(source, node),
             )
-            for call in node.children:
-                if call.type == "call_expression":
-                    func = _child_by_type(call, "identifier")
-                    if func:
-                        fent.relations.append(Relation(
-                            type="CALLS", target_name=_node_text(source, func), target_type="Function"
-                        ))
+            fent.relations.extend(
+                Relation(type="CALLS", target_name=t, target_type="Function")
+                for t in _collect_calls(source, node, "call_expression", "member_expression", "property")
+            )
+            entities.append(fent)
+        elif (
+            node.type == "variable_declarator"
+            and not parent_name
+            and (value := node.child_by_field_name("value")) is not None
+            and value.type in ("arrow_function", "function_expression", "function")
+        ):
+            # Componentes React y helpers: const Boton = (props) => {...}
+            name_node = node.child_by_field_name("name")
+            decl = node.parent if node.parent is not None and node.parent.type in (
+                "lexical_declaration", "variable_declaration"
+            ) else node
+            body = value.child_by_field_name("body")
+            code = _node_text(source, decl)
+            sig = code[: body.start_byte - decl.start_byte].strip() if body is not None else code.split("\n")[0]
+            fent = GraphEntity(
+                type="Function",
+                name=_node_text(source, name_node) if name_node else "",
+                file_path=file_path,
+                repo=repo,
+                branch=branch,
+                language=language,
+                start_line=decl.start_point[0] + 1,
+                end_line=decl.end_point[0] + 1,
+                signature=sig.rstrip("=> ").strip(),
+                docstring=_extract_docstring(source, decl),
+                code=code,
+            )
+            fent.relations.extend(
+                Relation(type="CALLS", target_name=t, target_type="Function")
+                for t in _collect_calls(source, value, "call_expression", "member_expression", "property")
+            )
             entities.append(fent)
         else:
             for child in node.children:
@@ -631,6 +759,7 @@ _LANGUAGE_EXTRACTOR = {
     "javascript": lambda s, t, r, b, fp: _extract_js_ts(s, t, r, b, fp, "javascript"),
     "typescript": lambda s, t, r, b, fp: _extract_js_ts(s, t, r, b, fp, "typescript"),
     "go": _extract_go,
+    "csharp": _extract_csharp,
 }
 
 
@@ -651,7 +780,7 @@ def parse_file(source: str, language: str, repo: str, branch: str, file_path: st
             return javaparser_result
         logger.info("Usando Tree-sitter fallback para Java: %s", file_path)
 
-    parser = _get_parser(language)
+    parser = _get_parser("tsx" if file_path.lower().endswith(".tsx") else language)
     if parser is None:
         logger.warning("No hay parser para lenguaje: %s", language)
         return []

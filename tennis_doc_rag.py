@@ -424,7 +424,7 @@ _BACKTICK_RE = re.compile(r"`([A-Za-z_][\w.]*)(?:\(\))?`")
 
 # Archivo pedido por nombre o ruta: UserMapper.xml, src/main/resources/application.yml
 _FILE_RE = re.compile(
-    r"(?<![\w.-])(?:[\w.-]+/)*([\w-]+\.(?:java|xml|sql|properties|ya?ml|json|html|jspf?|js|ts|py|md|txt))\b",
+    r"(?<![\w.-])(?:[\w.-]+/)*([\w-]+\.(?:java|cs|cshtml|razor|csproj|config|svc|xml|sql|properties|ya?ml|json|html|jspf?|jsx?|tsx?|py|go|md|txt))\b",
     re.IGNORECASE,
 )
 
@@ -885,6 +885,47 @@ class Filter:
             self._repos_cache_at = time.time()
 
         return repos
+
+    def _indexed_branch(self, repo, branch):
+        """
+        Rama a usar cuando el usuario no la escribió: la del historial o la por
+        defecto si están indexadas; si no, la primera rama indexada del repo
+        (un repo indexado solo en "main" no se busca en "prod").
+        """
+
+        if not repo:
+
+            return branch
+
+        try:
+
+            repos = self._get_repos()
+
+        except Exception:
+
+            return branch
+
+        for item in repos:
+
+            if item["name"] != repo or not item.get("branch"):
+
+                continue
+
+            indexed = [b.strip() for b in str(item["branch"]).split(",") if b.strip()]
+
+            for candidate in (branch, self.valves.default_branch):
+
+                if candidate and candidate in indexed:
+
+                    return candidate
+
+            if indexed:
+
+                self._log(f"{repo} no está indexado en '{branch or self.valves.default_branch}': uso '{indexed[0]}'")
+
+                return indexed[0]
+
+        return branch
 
     def _known_repo_names(self):
 
@@ -2994,6 +3035,8 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
 
         branch = self._extract_branch(query)
 
+        explicit_branch = branch
+
         retrieval_query = None
 
         if self.valves.use_history:
@@ -3038,6 +3081,10 @@ hay ninguno sugiere `indexa org/repositorio`. Sé breve.
                     analysis["strategy"] = prev_analysis["strategy"]
 
                 self._log("Pregunta de seguimiento: se combina con la anterior")
+
+        if not explicit_branch:
+
+            branch = self._indexed_branch(repo, branch)
 
         branch = branch or self.valves.default_branch
 

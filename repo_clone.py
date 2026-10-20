@@ -17,17 +17,17 @@ from dulwich import porcelain
 
 from ast_parser import _get_parser
 from config import CLONE_BASE_DIR
-from github_client import MINIFIED_SUFFIXES, get_installation_token_for_repo
+from github_client import (
+    IGNORED_PATHS,
+    MINIFIED_SUFFIXES,
+    SUPPORTED_EXTENSIONS,
+    get_installation_token_for_repo,
+)
 
 logger = logging.getLogger(__name__)
 
-# Extensiones que indexamos y que son relevantes para búsqueda en clon local
-_CLONE_SEARCH_EXTS = {
-    ".java", ".sql", ".xml", ".properties", ".yml", ".yaml",
-    ".json", ".html", ".js", ".ts", ".py", ".md", ".txt", ".jsp", ".jspf",
-}
-
-_IGNORED_DIRS = {".git", "node_modules", "__pycache__", "target", "build", "dist", ".next", "coverage", "vendor"}
+# Lenguajes cuyos archivos grandes se condensan por AST (mismos nombres de nodo en ambas gramáticas)
+_CONDENSE_LANG = {".java": "java", ".cs": "csharp"}
 
 
 def _get_clone_path(repo: str, branch: str = "HEAD") -> str:
@@ -113,6 +113,32 @@ def read_file_from_clone(repo: str, file_path: str, branch: str = "HEAD") -> str
         return None
 
 
+def _walk_supported(clone_path: str):
+    """(ruta absoluta, nombre) de cada archivo con extensión indexable, sin carpetas ignoradas."""
+    for root, dirs, fnames in os.walk(clone_path):
+        dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
+        for fname in fnames:
+            lower = fname.lower()
+            if fname in IGNORED_PATHS or lower.endswith(MINIFIED_SUFFIXES):
+                continue
+            if os.path.splitext(lower)[1] in SUPPORTED_EXTENSIONS:
+                yield os.path.join(root, fname), fname
+
+
+def list_files(repo: str, branch: str = "HEAD") -> list[dict]:
+    """Archivos indexables del clon, con el mismo formato que github_client.get_repo_files."""
+    clone_path = _get_clone_path(repo, branch)
+    if os.path.isfile(os.path.join(clone_path, ".gitmodules")):
+        logger.warning("%s @ %s usa submódulos git: su código no se clona ni se indexa", repo, branch)
+    return [
+        {
+            "path": os.path.relpath(fpath, clone_path).replace("\\", "/"),
+            "size": os.path.getsize(fpath),
+        }
+        for fpath, _ in _walk_supported(clone_path)
+    ]
+
+
 # ─────────────────────────────────────────
 # Búsqueda en el clon
 # ─────────────────────────────────────────
@@ -144,24 +170,19 @@ def search_clone(
     ranked = []
     # ponytail: recorre el repo completo en cada búsqueda; basta para repos
     # de miles de archivos. Si se vuelve lento, usar `git grep -l`.
-    for root, dirs, fnames in os.walk(clone_path):
-        dirs[:] = [d for d in dirs if d not in _IGNORED_DIRS]
-        for fname in fnames:
-            stem, ext = os.path.splitext(fname)
-            if ext.lower() not in _CLONE_SEARCH_EXTS or fname.lower().endswith(MINIFIED_SUFFIXES):
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read().lower()
-            except OSError:
-                continue
-            exact = stem.lower() in entity_names or fname.lower() in entity_names
-            hits = sum(1 for t in terms if t in content)
-            if not exact and hits == 0:
-                continue
-            in_name = any(t in stem.lower() for t in terms)
-            ranked.append(((exact, hits, in_name), fpath))
+    for fpath, fname in _walk_supported(clone_path):
+        stem = os.path.splitext(fname)[0]
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read().lower()
+        except OSError:
+            continue
+        exact = stem.lower() in entity_names or fname.lower() in entity_names
+        hits = sum(1 for t in terms if t in content)
+        if not exact and hits == 0:
+            continue
+        in_name = any(t in stem.lower() for t in terms)
+        ranked.append(((exact, hits, in_name), fpath))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
 
@@ -188,16 +209,17 @@ def search_clone(
 def _condense(source: str, fpath: str, methods: list[str], terms: list[str], max_chars: int) -> str:
     """
     Reduce un archivo grande sin perder la estructura:
-    - Java: conserva la clase, campos y firmas de todos los métodos; incluye
+    - Java y C#: conserva la clase, campos y firmas de todos los métodos; incluye
       completos los cuerpos de los métodos mencionados, luego los que más
       términos de la pregunta contienen y luego el resto en orden, hasta llenar
       max_chars. Los cuerpos que no caben se reemplazan por un comentario.
     - Otros lenguajes: se corta a max_chars.
     """
     truncated = source[:max_chars] + f"\n\n// ... archivo truncado ({len(source)} chars originales) ...\n"
-    parser = _get_parser("java") if fpath.lower().endswith(".java") else None
+    lang = _CONDENSE_LANG.get(os.path.splitext(fpath)[1].lower())
+    parser = _get_parser(lang) if lang else None
     if parser is None:
-        # ponytail: solo Java se condensa por AST; agregar otros lenguajes si hace falta
+        # ponytail: solo Java y C# se condensan por AST; agregar otros lenguajes si hace falta
         return truncated
 
     data = source.encode("utf-8")
