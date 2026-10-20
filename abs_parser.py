@@ -11,7 +11,9 @@ legible, que es lo que se indexa y lo que ve el modelo en el chat.
 """
 
 import re
-import xml.etree.ElementTree as ET
+
+import defusedxml.ElementTree as SafeET
+from defusedxml import DefusedXmlException
 
 from ast_parser import GraphEntity, Relation
 
@@ -48,14 +50,11 @@ def _one_line(text: str) -> str:
 
 
 def _parse_xml(source: str):
-    # Los .ABSClass no traen DOCTYPE; sin él no hay entidades XXE ni "billion laughs".
-    # Solo se mira el prólogo: un método puede generar HTML con <!DOCTYPE html> en un CDATA.
-    root_at = source.find("<Class")
-    if root_at < 0 or "<!DOCTYPE" in source[:root_at]:
-        return None
+    # defusedxml con forbid_dtd: un DOCTYPE en cualquier parte (XXE, "billion laughs") se
+    # rechaza en el parser; un <!DOCTYPE html> dentro de un CDATA es texto y no molesta.
     try:
-        root = ET.fromstring(source.encode("utf-8"))
-    except ET.ParseError:
+        root = SafeET.fromstring(source.encode("utf-8"), forbid_dtd=True)
+    except (SafeET.ParseError, DefusedXmlException):
         return None
     return root if root.tag == "Class" else None
 
