@@ -424,7 +424,7 @@ _BACKTICK_RE = re.compile(r"`([A-Za-z_][\w.]*)(?:\(\))?`")
 
 # Archivo pedido por nombre o ruta: UserMapper.xml, src/main/resources/application.yml
 _FILE_RE = re.compile(
-    r"(?<![\w.-])(?:[\w.-]+/)*([\w-]+\.(?:java|cs|cshtml|razor|csproj|config|svc|xml|sql|properties|ya?ml|json|html|jspf?|jsx?|tsx?|py|go|md|txt))\b",
+    r"(?<![\w.-])(?:[\w.-]+/)*([\w-]+\.(?:java|absclass|cs|cshtml|razor|csproj|config|svc|xml|sql|properties|ya?ml|json|html|jspf?|jsx?|tsx?|py|go|md|txt))\b",
     re.IGNORECASE,
 )
 

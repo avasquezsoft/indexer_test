@@ -29,6 +29,9 @@ SUPPORTED_EXTENSIONS = {
     # .NET: vistas, proyectos, web.config/app.config, servicios WCF
     ".cshtml", ".razor", ".csproj", ".config", ".svc", ".asmx",
     ".vb", ".vbproj", ".aspx", ".ascx", ".master", ".asax",  # VB.NET y WebForms (solo texto)
+    # 4GL ABS: clases (abs_parser.py) y metadatos chicos que se indexan como texto.
+    # Fuera: .ABSSupport (resúmenes generados de varios MB), colores, fuentes, imágenes, pestañas.
+    ".absclass", ".absmsg", ".absreffield", ".absglossary", ".absjar", ".abspersjsp", ".absjtype", ".absprop",
     ".ftl", ".hbs", ".mustache", ".twig",
     # Shell / scripts
     ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",

@@ -770,6 +770,10 @@ def parse_file(source: str, language: str, repo: str, branch: str, file_path: st
     Para Java intenta JavaParser primero; si falla, usa Tree-sitter.
     Para otros lenguajes usa Tree-sitter directamente.
     """
+    if language == "abs":
+        import abs_parser  # aquí y no arriba: abs_parser importa los modelos de este módulo
+        return abs_parser.parse(source, repo, branch, file_path)
+
     if language == "java":
         javaparser_result = _parse_java_with_javaparser(source, file_path)
         if javaparser_result is not None:

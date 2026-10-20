@@ -15,6 +15,7 @@ import shutil
 
 from dulwich import porcelain
 
+import abs_parser
 from ast_parser import _get_parser
 from config import CLONE_BASE_DIR
 from github_client import (
@@ -192,7 +193,9 @@ def search_clone(
             content = f.read()
         original_chars = len(content)
         limit = max_chars_exact if exact and max_chars_exact else max_chars_per_file
-        if original_chars > limit:
+        if fpath.lower().endswith(".absclass"):
+            content = abs_parser.render_for_question(content, methods, terms, limit)
+        elif original_chars > limit:
             content = _condense(content, fpath, methods, terms, limit)
         results.append({
             "file_path": os.path.relpath(fpath, clone_path).replace("\\", "/"),

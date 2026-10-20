@@ -19,6 +19,7 @@ from embedder import get_embedding, get_embeddings_batch
 from qdrant_store import get_client, ensure_collection, delete_repo_chunks, upsert_chunks, search_chunks, ping_client
 from config import QDRANT_COLLECTION, WEBHOOK_SECRET, VECTOR_SIZE, JAVAPARSER_URL, INDEXER_API_KEY
 
+import abs_parser
 import ast_parser
 import code_links
 import graph_store
@@ -335,6 +336,8 @@ async def index_repo(full_repo_name: str, branch: str = "HEAD"):
 
                     if language:
                         all_tables |= code_links.add_sql_links(entities, resolve_sql)
+                        if language == "abs":
+                            all_tables |= abs_parser.tables_read(entities)
                         if language in ("java", "csharp", "python"):
                             code_links.add_routes(entities)
                         if language == "java":
@@ -435,6 +438,7 @@ def _detect_language_from_path(file_path: str) -> str | None:
         "java": "java", "py": "python", "js": "javascript", "ts": "typescript",
         "jsx": "javascript", "tsx": "typescript", "go": "go", "cs": "csharp",
         "mjs": "javascript", "cjs": "javascript", "mts": "typescript", "cts": "typescript",
+        "absclass": "abs",  # 4GL ABS: XML con atributos y métodos (abs_parser.py)
     }
     return mapping.get(ext)
 
@@ -824,6 +828,9 @@ async def fetch_file(req: FetchFileRequest):
     # 1) Intentar leer del clon local
     local_content = repo_clone.read_file_from_clone(req.repo, req.file_path, req.branch)
     if local_content is not None:
+        if req.file_path.lower().endswith(".absclass"):
+            # El XML trae cientos de banderas de UI: se entrega la vista legible
+            local_content = abs_parser.render(local_content) or local_content
         log.info("Fetch local: %s/%s (desde clon)", req.repo, req.file_path)
         return {
             "repo": req.repo,

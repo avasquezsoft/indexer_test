@@ -30,6 +30,7 @@ Todo el despliegue se realiza mediante **Docker Compose** (`docker-compose.yml`)
 ├── config.py            # Variables de entorno centralizadas (obligatorias vs opcionales)
 ├── github_client.py     # Autenticación GitHub App (JWT) + fetch de repos y archivos
 ├── ast_parser.py        # Extracción de AST y entidades (Tree-sitter + JavaParser HTTP)
+├── abs_parser.py        # Clases del 4GL ABS (.ABSClass: XML con atributos y métodos)
 ├── chunker.py           # División de archivos en chunks con lógica por lenguaje
 ├── embedder.py          # Generación de embeddings vía OpenRouter (batch + reintentos)
 ├── qdrant_store.py      # Cliente Qdrant: colecciones, upsert, búsqueda, scroll
@@ -83,7 +84,7 @@ Todo el despliegue se realiza mediante **Docker Compose** (`docker-compose.yml`)
 2. Se clona el repo/rama y se listan sus archivos desde el clon (`repo_clone.list_files`); la API de GitHub (`github_client.get_repo_files`) solo si el clon falla, porque trunca el árbol en repos grandes.
 3. Para cada archivo:
    - Se detecta el lenguaje por extensión.
-   - Se parsea con `ast_parser.py` (Tree-sitter o JavaParser). Si el AST no da entidades (scripts, `module-info.java`), el archivo se indexa como texto con `chunker.py`; los lenguajes sin parser AST también.
+   - Se parsea con `ast_parser.py` (Tree-sitter o JavaParser; los `.ABSClass` del 4GL ABS con `abs_parser.py`: clase con vista legible, un `Method` por método, `CALLS` desde `invoke`, `READS`/`WRITES` desde `retrieve [for update] Entidad`). Si el AST no da entidades (scripts, `module-info.java`), el archivo se indexa como texto con `chunker.py`; los lenguajes sin parser AST también.
    - Se generan **entidades** (clases, métodos, campos, funciones) y **chunks**.
    - Los chunks se enriquecen con texto para embedding (`embed_text`).
    - Si es Java, se resuelven referencias a archivos `.sql` y se adjunta el contenido SQL inline.
